@@ -15,14 +15,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
-	"github.com/quic-go/quic-go/integrationtests/tools"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
-	"github.com/quic-go/quic-go/testutils/events"
+	"github.com/nol8io/quic-go"
+	"github.com/nol8io/quic-go/http3"
+	"github.com/nol8io/quic-go/integrationtests/tools"
+	"github.com/nol8io/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/internal/wire"
+	"github.com/nol8io/quic-go/qlog"
+	"github.com/nol8io/quic-go/qlogwriter"
+	"github.com/nol8io/quic-go/testutils/events"
 
 	"github.com/stretchr/testify/require"
 )

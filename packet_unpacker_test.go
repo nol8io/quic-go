@@ -4,12 +4,12 @@ import (
 	"crypto/rand"
 	"testing"
 
-	"github.com/quic-go/quic-go/internal/handshake"
-	"github.com/quic-go/quic-go/internal/mocks"
-	"github.com/quic-go/quic-go/internal/monotime"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/qerr"
-	"github.com/quic-go/quic-go/internal/wire"
+	"github.com/nol8io/quic-go/internal/handshake"
+	"github.com/nol8io/quic-go/internal/mocks"
+	"github.com/nol8io/quic-go/internal/monotime"
+	"github.com/nol8io/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/internal/qerr"
+	"github.com/nol8io/quic-go/internal/wire"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"

@@ -6,8 +6,8 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/wire"
+	"github.com/nol8io/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/internal/wire"
 
 	"github.com/stretchr/testify/require"
 )

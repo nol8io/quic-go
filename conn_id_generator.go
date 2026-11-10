@@ -5,10 +5,10 @@ import (
 	"slices"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/monotime"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/qerr"
-	"github.com/quic-go/quic-go/internal/wire"
+	"github.com/nol8io/quic-go/internal/monotime"
+	"github.com/nol8io/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/internal/qerr"
+	"github.com/nol8io/quic-go/internal/wire"
 )
 
 // The memory address of the Transport is used as the key.
