@@ -77,8 +77,8 @@ the nol8 commits. Each later sync is one commit on `master`, so upstream's commi
 v0.65.0 reach `master`'s content but not its history. Only `nol8/UPSTREAM` says which
 upstream release `master` contains.
 
-Upstream's workflows are unchanged. Three of them need upstream's own infrastructure, so
-they are disabled in this repository's Actions settings: "ClusterFuzzLite PR fuzzing",
+Upstream's workflows are unchanged apart from the module path. Three of them need
+upstream's own infrastructure, so they are disabled in this repository's Actions settings: "ClusterFuzzLite PR fuzzing",
 "Benchmarks" (CodSpeed) and "Build interop Docker image". GitHub disables scheduled
 workflows in a fork by default, so upstream's scheduled ones don't run here either.
 
@@ -97,9 +97,9 @@ Releases are tagged on `master`. A sync to upstream `vX.Y.Z` is released as
 tag's message says what changed. A fix that an older release needs goes on a branch
 `nol8/vX.Y.Z` made from that release's last tag, and is tagged there.
 
-`v0.65.0-nol8.1` was built on an earlier branch, and its tag has been removed. The Go
-module proxy still serves it, so that version name is never used again; `v0.65.0-nol8.2`
-has the same library code.
+`v0.65.0-nol8.1` was the first release, made before `master` became the trunk;
+`v0.65.0-nol8.2` has the same library code. The Go module proxy keeps every version it
+has served, so a version name is never used again, even if its tag is removed.
 
 ## Updating to a new upstream release
 
@@ -109,15 +109,24 @@ each month, and on demand from the Actions tab (run the "nol8 upstream" workflow
 no branch `sync/vX.Y.Z`, it runs `nol8/sync-pr.sh`. That builds the branch with
 `nol8/sync.sh` (step 1 below), pushes it and opens a pull request into `master`; review it
 from step 3 on. If the nol8 changes conflict with the release, the job opens nothing,
-fails, and names the files in its summary; then follow all the steps below. To skip a
-release, close its pull request and keep the branch.
+fails, and names the files in its summary; then follow all the steps below. Until someone
+does, or upstream publishes a newer release, the job fails again every month.
+
+- To skip a release, close its pull request and keep the branch. A branch `sync/vX.Y.Z`
+  without any pull request fails the job, so that a branch left over from a failed run
+  can't stop the syncs: open a pull request from it, or delete it.
+- When upstream publishes a newer release while a sync's pull request is still open, the
+  job opens another; close the older one.
+- The job only syncs to upstream's newest release. To sync to another one, such as a
+  patch release of an older line, run `nol8/sync.sh vX.Y.Z` by hand.
 
 The job pushes and opens the pull request with a fine-grained personal access token, kept
 in the repository secret `NOL8_SYNC_TOKEN`; a pull request opened with the workflow's own
 token wouldn't run CI. A member of the SDK team owns the token. It is limited to this
 repository, with read and write access to contents, pull requests and workflows, because a
 sync also brings upstream's changes to its workflow files. The job fails while the token
-is missing or expired, so replace it before it expires.
+is missing or expired, so replace it before it expires. The job's pull requests are
+opened as the token's owner, so someone else approves them.
 
 By hand, work in a clone of this repository that holds no upstream tags: `git tag -l`
 lists only this fork's tags. Never fetch upstream with its tags, and push branches with
@@ -167,10 +176,11 @@ lists only this fork's tags. Never fetch upstream with its tags, and push branch
     `nol8/advisories.sh vX.Y.Z` to check a release before syncing to it.
   - `govulncheck ./...` covers this fork's dependencies and the standard library.
 
-  GitHub notifies the user who added or last changed the workflow's schedule when a
-  scheduled run fails. It disables scheduled workflows in a fork by default, and in a public
-  repository after 60 days without activity. The owners check on the Actions tab that the
-  workflow is enabled, and re-enable it with `gh workflow enable nol8-upstream.yml`.
+  When a scheduled run fails, GitHub notifies whoever last changed the workflow's schedule
+  or last enabled the workflow, so that should be a member of the SDK team. GitHub can
+  disable scheduled workflows in a fork, and does in a public repository after 60 days
+  without activity. The owners check with `gh workflow list` that "nol8 upstream" is
+  active, and enable it with `gh workflow enable nol8-upstream.yml`.
 - **Reporting:** report an issue in the fork's own change to the Data Path SDK team.
   Report anything else to upstream, as described in [SECURITY.md](SECURITY.md).
 

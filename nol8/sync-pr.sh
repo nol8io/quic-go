@@ -20,8 +20,8 @@
 #   GITHUB_STEP_SUMMARY, GITHUB_RUN_ID   set by GitHub Actions; optional
 #
 # Exit status: 0 when master is on upstream's newest release, when branch
-# sync/vX.Y.Z already exists, or when this run opened the pull request; 1
-# otherwise.
+# sync/vX.Y.Z already has a pull request (open or closed), or when this run
+# opened one; 1 otherwise.
 set -euo pipefail
 
 upstream_url=${NOL8_UPSTREAM_URL:-https://github.com/quic-go/quic-go.git}
@@ -40,6 +40,11 @@ die() {
 	echo "nol8/sync-pr.sh: $*" >&2
 	summary "nol8/sync-pr.sh: $*"
 	exit 1
+}
+
+# git_gh runs git with GH_TOKEN, served by gh, as its only credential.
+git_gh() {
+	git -c credential.helper= -c 'credential.helper=!gh auth git-credential' "$@"
 }
 
 # newest prints the highest of the vX.Y.Z versions on stdin.
@@ -74,11 +79,18 @@ fi
 
 branch=sync/$latest
 found=0
-git ls-remote --exit-code --heads "$fork_url" "refs/heads/$branch" >/dev/null || found=$?
+git_gh ls-remote --exit-code --heads "$fork_url" "refs/heads/$branch" >/dev/null || found=$?
 case $found in
 0)
-	echo "Branch $branch already exists, so the sync to $latest is under way; nothing to do."
-	summary "Branch \`$branch\` already exists, so the sync to upstream \`$latest\` is under way; nothing to do."
+	# A pull request from the branch, open or closed, means the sync is in
+	# hand or was skipped. A branch without one is left from a failed run or
+	# pushed by hand: report it rather than stop syncing without a word.
+	prs=$(gh pr list --repo "$repo" --head "$branch" --state all --json number --jq length) ||
+		die "can't list the pull requests from $branch"
+	[ "$prs" != 0 ] ||
+		die "branch $branch exists but has no pull request; open one from it, or delete it so the next run starts over"
+	echo "Branch $branch already has a pull request, so the sync to $latest is in hand; nothing to do."
+	summary "Branch \`$branch\` already has a pull request, so the sync to upstream \`$latest\` is in hand; nothing to do."
 	exit 0
 	;;
 2) ;;
@@ -131,17 +143,24 @@ $(cat "$log")
 </details>
 EOF
 
-# gh supplies GH_TOKEN to git for this push only, whatever credential helpers
-# the user has; --no-follow-tags keeps every local tag out of the fork.
-git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
-	push --quiet --no-follow-tags "$fork_url" "refs/heads/$branch:refs/heads/$branch" ||
+# --no-follow-tags keeps every local tag out of the fork.
+git_gh push --quiet --no-follow-tags "$fork_url" "refs/heads/$branch:refs/heads/$branch" ||
 	die "pushing $branch failed; the token needs write access to contents, pull requests and workflows"
-if ! url=$(gh pr create --repo "$repo" --base master --head "$branch" \
-	--title "nol8: sync to upstream $latest" --body-file "$body"); then
-	# Without a pull request the branch would stop later runs; remove it so
-	# the next run tries again.
-	git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
-		push --quiet --no-follow-tags "$fork_url" --delete "refs/heads/$branch" ||
+# GitHub can briefly refuse a pull request from a branch just pushed.
+url=
+for attempt in 1 2 3; do
+	if url=$(gh pr create --repo "$repo" --base master --head "$branch" \
+		--title "nol8: sync to upstream $latest" --body-file "$body"); then
+		break
+	fi
+	url=
+	if [ "$attempt" -lt 3 ]; then
+		sleep $((attempt * 5))
+	fi
+done
+if [ -z "$url" ]; then
+	# Remove the branch, so that the next run tries again.
+	git_gh push --quiet --no-follow-tags "$fork_url" --delete "refs/heads/$branch" ||
 		echo "nol8/sync-pr.sh: removing $branch failed too; delete it so the next run can try again" >&2
 	die "opening the pull request for $branch failed"
 fi

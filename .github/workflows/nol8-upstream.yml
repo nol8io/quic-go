@@ -8,8 +8,8 @@ name: nol8 upstream
 #   so a sync's pull request checks the release it moves to.
 # - "Upstream sync" opens a pull request into master when upstream has a newer
 #   release, with the token in the NOL8_SYNC_TOKEN secret.
-# GitHub disables scheduled workflows in a fork by default, so this one is
-# enabled once on the Actions tab.
+# GitHub can disable scheduled workflows in a fork, and does after 60 days
+# without activity; check that this one is active (gh workflow list).
 
 on:
   schedule:
