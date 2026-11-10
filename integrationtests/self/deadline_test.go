@@ -126,7 +126,8 @@ func TestReadDeadlineAsync(t *testing.T) {
 	select {
 	case err := <-errChan:
 		require.NoError(t, err)
-	case <-time.After(time.Second):
+	// nol8: 10s, as in upstream's open quic-go/quic-go#6079. 1s timed out under -race in CI.
+	case <-time.After(10 * time.Second):
 		t.Fatal("timeout")
 	}
 }
@@ -229,7 +230,8 @@ func TestWriteDeadlineAsync(t *testing.T) {
 	select {
 	case err := <-errChan:
 		require.NoError(t, err)
-	case <-time.After(time.Second):
+	// nol8: 10s, as in upstream's open quic-go/quic-go#6079. 1s timed out under -race in CI.
+	case <-time.After(10 * time.Second):
 		t.Fatal("timeout")
 	}
 }

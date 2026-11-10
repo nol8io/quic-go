@@ -71,6 +71,10 @@ these changes.
    GitHub disables scheduled workflows in a fork by default, so upstream's scheduled
    fuzzing, coverage and govulncheck workflows don't run here. The fork's own advisory check
    is enabled on its own.
+6. **A test timeout.** `integrationtests/self/deadline_test.go` gives the reader in
+   `TestReadDeadlineAsync` and `TestWriteDeadlineAsync` 10 seconds to finish instead of 1, as
+   upstream's open [#6079](https://github.com/quic-go/quic-go/pull/6079) does. The
+   1-second wait timed out under the race detector in this fork's CI.
 
 Nothing else changes. To see the full delta, fetch the upstream release named in
 `nol8/UPSTREAM`, without upstream's other tags, and compare it with `master`. Most of the
