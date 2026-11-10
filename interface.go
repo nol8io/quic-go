@@ -181,6 +181,18 @@ type Config struct {
 	// a "message too long" error at that size fails the handshake instead.
 	// Values below 1200 are invalid.
 	InitialPacketSize uint16
+	// MaxPacketSize is the maximum UDP payload size this connection will send
+	// or advertise in max_udp_payload_size. Path MTU discovery starts at
+	// InitialPacketSize and won't probe above this value or the peer's
+	// max_udp_payload_size. An InitialPacketSize above this value is lowered to
+	// it. The peer's value doesn't lower a packet size already above it (an
+	// explicit InitialPacketSize, or the 1280-byte default when the peer
+	// advertises less), so keep InitialPacketSize at or below the smallest
+	// limit your peers advertise.
+	// If 0, 8192 is used. Listen and Dial reject values below 1200 or above 8192;
+	// a Config returned by GetConfigForClient isn't validated, so its value is
+	// clamped to that range.
+	MaxPacketSize uint16
 	// DisablePathMTUDiscovery disables Path MTU Discovery (RFC 8899).
 	// This allows the sending of QUIC packets that fully utilize the available MTU of the path.
 	// Path MTU discovery is only available on systems that allow setting of the Don't Fragment (DF) bit.

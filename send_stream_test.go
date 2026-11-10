@@ -1,7 +1,6 @@
 package quic
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -533,7 +532,9 @@ func TestSendStreamLargeWrites(t *testing.T) {
 		str := newSendStream(context.Background(), streamID, mockSender, mockFC, false)
 
 		mockSender.EXPECT().onHasStreamData(streamID, str)
-		data := make([]byte, 5000)
+		// Larger than the stream buffer. The 40-byte pops below must leave a final
+		// frame strictly smaller than the mocked send window (MaxPacketBufferSize).
+		data := make([]byte, protocol.MaxPacketBufferSize+60)
 		rand.Read(data)
 		errChan := make(chan error, 1)
 		go func() {
@@ -701,7 +702,7 @@ func TestSendStreamDeadlineRemoval(t *testing.T) {
 		// large writes might block, and therefore subject to the deadline
 		errChan := make(chan error, 1)
 		go func() {
-			_, err := (&writerWithTimeout{Writer: str, Timeout: 5 * time.Second}).Write(make([]byte, 2000))
+			_, err := (&writerWithTimeout{Writer: str, Timeout: 5 * time.Second}).Write(make([]byte, protocol.MaxPacketBufferSize+1))
 			errChan <- err
 		}()
 
@@ -753,7 +754,7 @@ func TestSendStreamDeadlineExtension(t *testing.T) {
 		mockSender.EXPECT().onHasStreamData(gomock.Any(), str)
 		errChan := make(chan error, 1)
 		go func() {
-			_, err := str.Write(make([]byte, 2000))
+			_, err := str.Write(make([]byte, protocol.MaxPacketBufferSize+1))
 			errChan <- err
 		}()
 
@@ -902,7 +903,7 @@ func TestSendStreamCloseForShutdown(t *testing.T) {
 		mockSender.EXPECT().onHasStreamData(streamID, str)
 		errChan := make(chan error, 1)
 		go func() {
-			_, err := strWithTimeout.Write(bytes.Repeat([]byte("foobar"), 1000))
+			_, err := strWithTimeout.Write(make([]byte, protocol.MaxPacketBufferSize+1))
 			errChan <- err
 		}()
 
@@ -994,7 +995,7 @@ func TestSendStreamCancellation(t *testing.T) {
 		mockSender.EXPECT().onHasStreamData(streamID, str).Do(func(protocol.StreamID, *SendStream) { close(wrote) })
 		errChan := make(chan error, 1)
 		go func() {
-			_, err := strWithTimeout.Write(make([]byte, 2000))
+			_, err := strWithTimeout.Write(make([]byte, protocol.MaxPacketBufferSize+1))
 			errChan <- err
 		}()
 
@@ -1258,7 +1259,7 @@ func TestSendStreamStopSendingDuringWrite(t *testing.T) {
 
 		errChan := make(chan error, 1)
 		go func() {
-			_, err := str.Write(make([]byte, 2000))
+			_, err := str.Write(make([]byte, protocol.MaxPacketBufferSize+1))
 			errChan <- err
 		}()
 

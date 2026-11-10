@@ -198,7 +198,7 @@ func TestDatagramSizeLimitWithMTUDiscovery(t *testing.T) {
 		require.NoError(t, ctx.Err())
 	}
 
-	err = clientConn.SendDatagram(bytes.Repeat([]byte("x"), 2000))
+	err = clientConn.SendDatagram(bytes.Repeat([]byte("x"), int(protocol.MaxPacketBufferSize)+1)) // DGRAM: larger than the fork's 8192-byte ceiling
 	var sizeErr *quic.DatagramTooLargeError
 	require.ErrorAs(t, err, &sizeErr)
 	maxPayloadSize := sizeErr.MaxDatagramPayloadSize

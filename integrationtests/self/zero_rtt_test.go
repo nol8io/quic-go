@@ -758,7 +758,9 @@ func Test0RTTRejectedOnConnectionWindowDecrease(t *testing.T) {
 		str, err := conn.OpenStream()
 		require.NoError(t, err)
 		str.SetWriteDeadline(time.Now().Add(time.Second))
-		n, err := str.Write(make([]byte, 2000))
+		// Still larger than the stream buffer after the 99-byte connection window is sent,
+		// so Write stays blocked until the deadline instead of copying the tail.
+		n, err := str.Write(make([]byte, protocol.MaxPacketBufferSize+2000))
 		require.ErrorIs(t, err, os.ErrDeadlineExceeded)
 		require.Equal(t, newConnFlowControlWindow, n)
 

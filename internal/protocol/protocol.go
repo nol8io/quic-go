@@ -104,11 +104,12 @@ const InvalidByteCount ByteCount = -1
 // A StatelessResetToken is a stateless reset token.
 type StatelessResetToken [16]byte
 
-// MaxPacketBufferSize maximum packet size of any QUIC packet, based on
-// ethernet's max size, minus the IP and UDP headers. IPv6 has a 40 byte header,
-// UDP adds an additional 8 bytes.  This is a total overhead of 48 bytes.
-// Ethernet's max packet size is 1500 bytes,  1500 - 48 = 1452.
-const MaxPacketBufferSize = 1452
+// MaxPacketBufferSize is the maximum QUIC packet size, in bytes of UDP payload.
+// Upstream quic-go hard-codes 1452 (Ethernet MTU 1500 minus 48 bytes of
+// IPv6 + UDP). The nol8 fork raises that ceiling to 8192 so path MTU
+// discovery can grow toward jumbo frames. InitialPacketSize stays 1280; this
+// constant is only the upper bound.
+const MaxPacketBufferSize = 8192
 
 // MaxLargePacketBufferSize is used when using GSO
 const MaxLargePacketBufferSize = 20 * 1024

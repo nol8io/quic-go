@@ -2,7 +2,6 @@ package quic
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -222,6 +221,9 @@ type Conn struct {
 	pacingDeadline monotime.Time
 
 	peerParams *wire.TransportParameters
+	// peerMaxUDPPayloadSize is peerParams.MaxUDPPayloadSize once applied, for
+	// MaxUDPPayloadLimits, which other goroutines call.
+	peerMaxUDPPayloadSize atomic.Int64
 
 	timer *time.Timer
 	// keepAlivePingSent stores whether a keep alive PING is in flight.
@@ -342,7 +344,7 @@ var newConnection = func(
 		MaxUniStreamNum:                 protocol.StreamNum(s.config.MaxIncomingUniStreams),
 		MaxAckDelay:                     ackhandler.MaxAckDelay + protocol.TimerGranularity,
 		AckDelayExponent:                protocol.AckDelayExponent,
-		MaxUDPPayloadSize:               protocol.MaxPacketBufferSize,
+		MaxUDPPayloadSize:               s.config.maxUDPPayloadSize(),
 		StatelessResetToken:             &statelessResetToken,
 		OriginalDestinationConnectionID: origDestConnID,
 		// For interoperability with quic-go versions before May 2023, this value must be set to a value
@@ -479,7 +481,7 @@ var newClientConnection = func(
 		MaxBidiStreamNum:               protocol.StreamNum(s.config.MaxIncomingStreams),
 		MaxUniStreamNum:                protocol.StreamNum(s.config.MaxIncomingUniStreams),
 		MaxAckDelay:                    ackhandler.MaxAckDelay + protocol.TimerGranularity,
-		MaxUDPPayloadSize:              protocol.MaxPacketBufferSize,
+		MaxUDPPayloadSize:              s.config.maxUDPPayloadSize(),
 		AckDelayExponent:               protocol.AckDelayExponent,
 		// For interoperability with quic-go versions before May 2023, this value must be set to a value
 		// different from protocol.DefaultActiveConnectionIDLimit.
@@ -772,6 +774,25 @@ func (c *Conn) supportsDatagrams() bool {
 	return c.peerParams.MaxDatagramFrameSize > 0
 }
 
+// MaxUDPPayloadLimits reports this connection's packet-size ceiling.
+// local is the configured MaxPacketSize (8192 when unset).
+// peer is the peer's max_udp_payload_size once its transport parameters are
+// applied (on the client, at handshake completion), and 0 before. A peer that
+// omits the parameter reports the largest value the parameter can carry.
+// effective is min(local, peer) once the peer value is known: the Path MTU
+// discovery ceiling. A packet size already above the peer's value (an
+// explicit InitialPacketSize, or the 1280-byte default when the peer
+// advertises less) isn't lowered, so the size in use can exceed effective.
+// It is safe to call from any goroutine at any time.
+func (c *Conn) MaxUDPPayloadLimits() (local, peer, effective int64) {
+	local = int64(c.config.maxUDPPayloadSize())
+	peer = c.peerMaxUDPPayloadSize.Load()
+	if peer <= 0 {
+		return local, 0, local
+	}
+	return local, peer, min(local, peer)
+}
+
 // ConnectionState returns basic details about the QUIC connection.
 func (c *Conn) ConnectionState() ConnectionState {
 	c.connStateMutex.Lock()
@@ -933,7 +954,7 @@ func (c *Conn) switchToNewPath(tr *Transport, now monotime.Time) {
 		}
 	}
 
-	initialPacketSize := protocol.ByteCount(cmp.Or(c.config.InitialPacketSize, protocol.MinInitialPacketSize))
+	initialPacketSize := c.config.newPathPacketSize()
 	c.sentPacketHandler.MigratedPath(now, initialPacketSize)
 	c.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(initialPacketSize)))
 	c.mtuDiscoverer.Reset(initialPacketSize, c.maxMTU())
@@ -1322,7 +1343,7 @@ func (c *Conn) handleShortHeaderPacket(
 	}
 	c.pathManager.SwitchToPath(p.remoteAddr)
 	c.connIDManager.SwitchToPath(path)
-	initialPacketSize := protocol.ByteCount(cmp.Or(c.config.InitialPacketSize, protocol.MinInitialPacketSize))
+	initialPacketSize := c.config.newPathPacketSize()
 	c.sentPacketHandler.MigratedPath(p.rcvTime, initialPacketSize)
 	c.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(initialPacketSize)))
 	c.mtuDiscoverer.Reset(initialPacketSize, c.maxMTU())
@@ -2521,16 +2542,20 @@ func (c *Conn) applyTransportParameters() {
 		// Retire the connection ID.
 		c.connIDManager.AddFromPreferredAddress(params.PreferredAddress.ConnectionID, params.PreferredAddress.StatelessResetToken)
 	}
+	c.peerMaxUDPPayloadSize.Store(int64(params.MaxUDPPayloadSize))
 	if c.mtuDiscoverer != nil {
 		c.mtuDiscoverer = newMTUDiscoverer(c.rttStats, c.mtuDiscoverer.CurrentSize(), c.maxMTU(), c.qlogger)
 	}
 }
 
+// maxMTU is the Path MTU discovery ceiling: the configured MaxPacketSize, lowered
+// to the peer's max_udp_payload_size once that is known.
 func (c *Conn) maxMTU() protocol.ByteCount {
+	local := c.config.maxUDPPayloadSize()
 	if c.peerParams == nil || c.peerParams.MaxUDPPayloadSize <= 0 {
-		return protocol.MaxPacketBufferSize
+		return local
 	}
-	return min(protocol.MaxPacketBufferSize, c.peerParams.MaxUDPPayloadSize)
+	return min(local, c.peerParams.MaxUDPPayloadSize)
 }
 
 func (c *Conn) triggerSending(now monotime.Time) error {
