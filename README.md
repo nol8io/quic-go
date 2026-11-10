@@ -56,8 +56,10 @@ these changes.
    generated mocks, and in the package paths in CI and build scripts. Links to upstream
    issues, pull requests and documentation still point upstream.
 3. This section of the README.
-4. **Fork tooling.** `nol8/UPSTREAM` and `nol8/sync.sh`, which moves these changes to a new
-   upstream release.
+4. **Fork tooling.** `nol8/UPSTREAM`; `nol8/sync.sh`, which moves these changes to a new
+   upstream release; and `nol8/advisories.sh` with its workflow,
+   `.github/workflows/nol8-advisories.yml`, which check upstream's security advisories (see
+   [Ownership and security](#ownership-and-security)).
 5. **CI.** Three workflows that use upstream's own infrastructure check
    `github.repository`:
    - `clusterfuzz-lite-pr.yml` fuzzes without upstream's corpus storage, as upstream does
@@ -66,8 +68,9 @@ these changes.
    - `build-interop-docker.yml` builds the interop image on pull requests, and only upstream
      pushes it to Docker Hub.
 
-   GitHub doesn't run scheduled workflows in a fork, so upstream's scheduled fuzzing,
-   coverage and govulncheck workflows don't run here.
+   GitHub disables scheduled workflows in a fork by default, so upstream's scheduled
+   fuzzing, coverage and govulncheck workflows don't run here. The fork's own advisory check
+   is enabled on its own.
 
 Nothing else changes. To see the full delta, fetch the upstream release named in
 `nol8/UPSTREAM`, without upstream's other tags, and compare it with `master`. Most of the
@@ -144,8 +147,20 @@ this fork's tags. Never fetch upstream with its tags, and push branches with
 - **Owner:** the nol8 Data Path SDK team.
 - **Upstream security fixes:** applied within 7 days, released as the next patch version, or
   by syncing to the upstream release that contains the fix.
-- **Advisory watch:** `govulncheck` doesn't map upstream advisories to this module path.
-  The owners therefore watch upstream security advisories and releases instead.
+- **Advisory watch:** `govulncheck` matches advisories by module path, so a scan of this
+  fork never reports upstream quic-go's own advisories. The `nol8 upstream advisories`
+  workflow (`.github/workflows/nol8-advisories.yml`) runs every day, on every pull request
+  and on demand. It runs two checks:
+  - `nol8/advisories.sh` checks the upstream release in `nol8/UPSTREAM` against the Go
+    vulnerability database, and fails on any upstream quic-go advisory that affects it. A
+    sync's pull request therefore checks the release it moves to. Run
+    `nol8/advisories.sh vX.Y.Z` to check a release before syncing to it.
+  - `govulncheck ./...` covers this fork's dependencies and the standard library.
+
+  GitHub notifies the user who added or last changed the workflow's schedule when a
+  scheduled run fails. It disables scheduled workflows in a fork by default, and in a public
+  repository after 60 days without activity. The owners check on the Actions tab that the
+  workflow is enabled, and re-enable it with `gh workflow enable nol8-advisories.yml`.
 - **Reporting:** report an issue in the fork's own change to the Data Path SDK team.
   Report anything else to upstream, as described in [SECURITY.md](SECURITY.md).
 
