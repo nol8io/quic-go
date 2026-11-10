@@ -58,6 +58,16 @@ these changes.
 3. This section of the README.
 4. **Fork tooling.** `nol8/UPSTREAM` and `nol8/sync.sh`, which moves these changes to a new
    upstream release.
+5. **CI.** Three workflows that use upstream's own infrastructure check
+   `github.repository`:
+   - `clusterfuzz-lite-pr.yml` fuzzes without upstream's corpus storage, as upstream does
+     for pull requests from forks.
+   - `codspeed.yml` runs only upstream, on CodSpeed's `codspeed-macro` runner.
+   - `build-interop-docker.yml` builds the interop image on pull requests, and only upstream
+     pushes it to Docker Hub.
+
+   GitHub doesn't run scheduled workflows in a fork, so upstream's scheduled fuzzing,
+   coverage and govulncheck workflows don't run here.
 
 Nothing else changes. To see the full delta, fetch the upstream release named in
 `nol8/UPSTREAM`, without upstream's other tags, and compare it with `master`. Most of the

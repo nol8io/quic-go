@@ -21,6 +21,8 @@ concurrency:
 jobs:
   benchmarks:
     name: Benchmarks
+    # nol8: the codspeed-macro runner is available only to upstream.
+    if: github.repository == 'quic-go/quic-go'
     runs-on: codspeed-macro
     timeout-minutes: 180
     steps:
