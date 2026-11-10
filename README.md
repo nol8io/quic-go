@@ -1,3 +1,89 @@
+# nol8 fork of quic-go
+
+This is nol8's fork of [quic-go](https://github.com/quic-go/quic-go), imported as
+`github.com/nol8io/quic-go` by the nol8 Data Path Go SDK and by Argus. Everything below
+this section is upstream's README, unchanged.
+
+## Why it exists
+
+Upstream caps every QUIC packet at 1452 bytes of UDP payload
+(`internal/protocol.MaxPacketBufferSize`), and no setting changes that. Iris links run on
+networks with larger MTUs, so this fork lets Path MTU discovery grow packets up to
+8192 bytes. A Go library can't impose a `replace` directive on the applications that use
+it, so the change ships as a fork with its own module path.
+
+## What differs from upstream
+
+Release branch `nol8/vX.Y.Z` is upstream tag `vX.Y.Z` plus exactly these changes.
+
+1. **Packet size.** This is Argus's change (Argus `e9d6c34`), ported to the upstream
+   version.
+   - `MaxPacketBufferSize` is 8192 instead of 1452. This constant also sizes every
+     receive buffer, pooled packet buffer and pooled STREAM frame, and sets the size
+     below which `Stream.Write` copies data and returns. A lower `MaxPacketSize`
+     doesn't bring back upstream's memory use or `Write` behaviour.
+   - The same constant caps `InitialPacketSize`. Upstream lowers a value above 1452
+     to 1452 without an error; the fork keeps values up to 8192. An application that
+     set 1500 now sends 1500-byte packets, and its handshake fails on a path that
+     can't carry them.
+   - With GSO, a send batch holds as many packets of the current size as fit in
+     20 KiB: 14 at 1452 bytes, as upstream, and 2 once packets reach 8192.
+   - `Config.MaxPacketSize` sets this side's limit:
+     - 0 means 8192.
+     - `Listen` and `Dial` reject values outside 1200–8192. A `Config` returned by
+       `GetConfigForClient` isn't validated, so its value is clamped to that range.
+     - It's advertised to the peer as `max_udp_payload_size`.
+     - Path MTU discovery never probes above the lower of it and the peer's value.
+     - An `InitialPacketSize` above it is lowered to it, and so is the 1280-byte
+       default.
+     - The peer's value doesn't lower a packet size already above it: an explicit
+       `InitialPacketSize`, or the 1280-byte default when the peer advertises
+       1200–1279. This is upstream's behaviour.
+   - `Conn.MaxUDPPayloadLimits()` reports the local, peer and effective limits, and is
+     safe to call from any goroutine. The effective limit is the Path MTU discovery
+     ceiling; in the two cases above, the packet size in use can be larger.
+   - New tests cover the setting.
+   - Upstream tests whose inputs assumed the 1452-byte ceiling now size those inputs from
+     `MaxPacketBufferSize`, with every assertion kept: `send_stream_test.go`,
+     `integrationtests/self/zero_rtt_test.go` and `integrationtests/self/datagram_test.go`.
+   - `config_test.go` gives the new field a value in its every-field-set helper.
+2. **Module path.** Upstream's `github.com/quic-go/quic-go` becomes
+   `github.com/nol8io/quic-go`. It changes in every `go.mod` file and Go import, in the
+   generated mocks, and in the package paths in CI and build scripts. Links to upstream
+   issues, pull requests and documentation still point upstream.
+3. This section of the README.
+
+Nothing else changes. To see the full delta, compare a release branch with its upstream
+tag.
+
+## Versions
+
+Tags are `vX.Y.Z-nol8.N`: upstream `vX.Y.Z` with nol8 revision `N`. This repository keeps
+no upstream tags. Go orders `vX.Y.Z-nol8.N` before `vX.Y.Z`, so depend on an exact fork
+version:
+
+```
+go get github.com/nol8io/quic-go@v0.65.0-nol8.1
+```
+
+## Ownership and security
+
+- **Owner:** the nol8 Data Path SDK team.
+- **Upstream security fixes:** applied within 7 days, released as a new `-nol8.N` tag or a
+  new release branch.
+- **Advisory watch:** `govulncheck` doesn't map upstream advisories to this module path.
+  The owners therefore watch upstream security advisories and releases instead.
+- **Reporting:** report an issue in the fork's own change to the Data Path SDK team.
+  Report anything else to upstream, as described in [SECURITY.md](SECURITY.md).
+
+## End of life
+
+nol8 is proposing upstream that the maximum packet size become a configuration option.
+Once upstream supports it, the SDK and Argus move back to upstream quic-go and this
+repository is archived.
+
+---
+
 <div align="center" style="margin-bottom: 15px;">
   <img src="./assets/quic-go-logo.png" width="700" height="auto">
 </div>
