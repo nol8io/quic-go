@@ -46,6 +46,9 @@ Release branch `nol8/vX.Y.Z` is upstream tag `vX.Y.Z` plus exactly these changes
    - Upstream tests whose inputs assumed the 1452-byte ceiling now size those inputs from
      `MaxPacketBufferSize`, with every assertion kept: `send_stream_test.go`,
      `integrationtests/self/zero_rtt_test.go` and `integrationtests/self/datagram_test.go`.
+   - `integrationtests/self/mtu_test.go` caps its client at upstream's 1452 bytes. From 8192,
+     Path MTU discovery doesn't get within 25 bytes of the test path's MTU during that test's
+     transfer.
    - `config_test.go` gives the new field a value in its every-field-set helper.
 2. **Module path.** Upstream's `github.com/quic-go/quic-go` becomes
    `github.com/nol8io/quic-go`. It changes in every `go.mod` file and Go import, in the

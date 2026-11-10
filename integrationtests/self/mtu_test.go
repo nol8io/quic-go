@@ -116,8 +116,12 @@ func TestPathMTUDiscovery(t *testing.T) {
 		getTLSClientConfig(),
 		getQuicConfig(&quic.Config{
 			InitialPacketSize: protocol.MinInitialPacketSize,
-			EnableDatagrams:   true,
-			Tracer:            newTracer(&eventRecorder),
+			// nol8: upstream's 1452-byte ceiling. From the fork's default of 8192,
+			// the search doesn't get within 25 bytes of the path MTU during this
+			// transfer. max_packet_size_test.go covers the higher ceiling.
+			MaxPacketSize:   1452,
+			EnableDatagrams: true,
+			Tracer:          newTracer(&eventRecorder),
 		}),
 	)
 	require.NoError(t, err)
