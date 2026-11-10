@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/monotime"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/utils"
+	"github.com/nol8io/quic-go/internal/monotime"
+	"github.com/nol8io/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/internal/utils"
 )
 
 const desiredBufferSize = 2 << 20 // 2 MiB

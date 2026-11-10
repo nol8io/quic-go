@@ -27,8 +27,8 @@ COPY . /quic-go
 WORKDIR /quic-go
 
 RUN git rev-parse HEAD | tee commit.txt
-RUN go build -o server -ldflags="-X github.com/quic-go/quic-go/qlog.quicGoVersion=$(git describe --always --long --dirty)" interop/server/main.go
-RUN go build -o client -ldflags="-X github.com/quic-go/quic-go/qlog.quicGoVersion=$(git describe --always --long --dirty)" interop/client/main.go
+RUN go build -o server -ldflags="-X github.com/nol8io/quic-go/qlog.quicGoVersion=$(git describe --always --long --dirty)" interop/server/main.go
+RUN go build -o client -ldflags="-X github.com/nol8io/quic-go/qlog.quicGoVersion=$(git describe --always --long --dirty)" interop/client/main.go
 
 
 FROM martenseemann/quic-network-simulator-endpoint:latest

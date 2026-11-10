@@ -9,15 +9,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/handshake"
-	"github.com/quic-go/quic-go/internal/monotime"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/qerr"
-	"github.com/quic-go/quic-go/internal/udp"
-	"github.com/quic-go/quic-go/internal/utils"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
+	"github.com/nol8io/quic-go/internal/handshake"
+	"github.com/nol8io/quic-go/internal/monotime"
+	"github.com/nol8io/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/internal/qerr"
+	"github.com/nol8io/quic-go/internal/utils"
+	"github.com/nol8io/quic-go/internal/wire"
+	"github.com/nol8io/quic-go/qlog"
+	"github.com/nol8io/quic-go/qlogwriter"
 )
 
 // ErrServerClosed is returned by [Listener.Accept] or [EarlyListener.Accept]
@@ -69,7 +68,7 @@ type baseServer struct {
 	tlsConf *tls.Config
 	config  *Config
 
-	conn udp.Conn
+	conn rawConn
 
 	tokenGenerator *handshake.TokenGenerator
 	maxTokenAge    time.Duration
@@ -253,7 +252,7 @@ func ListenEarly(conn net.PacketConn, tlsConf *tls.Config, config *Config) (*Ear
 }
 
 func newServer(
-	conn udp.Conn,
+	conn rawConn,
 	tr *packetHandlerMap,
 	connIDGenerator ConnectionIDGenerator,
 	statelessResetter *statelessResetter,
@@ -945,7 +944,7 @@ func (s *baseServer) sendRetryPacket(p rejectedPacket) error {
 		replyHdr.Log(s.logger)
 	}
 
-	buf := udp.GetPacketBuffer()
+	buf := getPacketBuffer()
 	defer buf.Release()
 	buf.Data, err = replyHdr.Append(buf.Data, hdr.Version)
 	if err != nil {
@@ -1029,8 +1028,8 @@ func (s *baseServer) sendConnectionRefused(p rejectedPacket) {
 }
 
 // sendError sends the error as a response to the packet received with header hdr
-func (s *baseServer) sendError(remoteAddr net.Addr, hdr *wire.Header, sealer handshake.LongHeaderSealer, errorCode qerr.TransportErrorCode, info udp.PacketInfo) error {
-	b := udp.GetPacketBuffer()
+func (s *baseServer) sendError(remoteAddr net.Addr, hdr *wire.Header, sealer handshake.LongHeaderSealer, errorCode qerr.TransportErrorCode, info packetInfo) error {
+	b := getPacketBuffer()
 	defer b.Release()
 
 	ccf := &wire.ConnectionCloseFrame{ErrorCode: uint64(errorCode)}

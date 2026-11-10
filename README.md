@@ -1,3 +1,149 @@
+# nol8 fork of quic-go
+
+This is nol8's fork of [quic-go](https://github.com/quic-go/quic-go), imported as
+`github.com/nol8io/quic-go` by the nol8 Data Path Go SDK and by Argus. Everything below
+this section is upstream's README, unchanged.
+
+## Why it exists
+
+Upstream caps every QUIC packet at 1452 bytes of UDP payload
+(`internal/protocol.MaxPacketBufferSize`), and no setting changes that. Iris links run on
+networks with larger MTUs, so this fork lets Path MTU discovery grow packets up to
+8192 bytes. A Go library can't impose a `replace` directive on the applications that use
+it, so the change ships as a fork with its own module path.
+
+## What differs from upstream
+
+Branch `master` is the upstream release named in [`nol8/UPSTREAM`](nol8/UPSTREAM) plus exactly
+these changes.
+
+1. **Packet size.** This is Argus's change (Argus `e9d6c34`), ported to the upstream
+   version.
+   - `MaxPacketBufferSize` is 8192 instead of 1452. This constant also sizes every
+     receive buffer, pooled packet buffer and pooled STREAM frame, and sets the size
+     below which `Stream.Write` copies data and returns. A lower `MaxPacketSize`
+     doesn't bring back upstream's memory use or `Write` behaviour.
+   - The same constant caps `InitialPacketSize`. Upstream lowers a value above 1452
+     to 1452 without an error; the fork keeps values up to 8192. An application that
+     set 1500 now sends 1500-byte packets, and its handshake fails on a path that
+     can't carry them.
+   - With GSO, a send batch holds as many packets of the current size as fit in
+     20 KiB: 14 at 1452 bytes, as upstream, and 2 once packets reach 8192.
+   - `Config.MaxPacketSize` sets this side's limit:
+     - 0 means 8192.
+     - `Listen` and `Dial` reject values outside 1200–8192. A `Config` returned by
+       `GetConfigForClient` isn't validated, so its value is clamped to that range.
+     - It's advertised to the peer as `max_udp_payload_size`.
+     - Path MTU discovery never probes above the lower of it and the peer's value.
+     - An `InitialPacketSize` above it is lowered to it, and so is the 1280-byte
+       default.
+     - The peer's value doesn't lower a packet size already above it: an explicit
+       `InitialPacketSize`, or the 1280-byte default when the peer advertises
+       1200–1279. This is upstream's behaviour.
+   - `Conn.MaxUDPPayloadLimits()` reports the local, peer and effective limits, and is
+     safe to call from any goroutine. The effective limit is the Path MTU discovery
+     ceiling; in the two cases above, the packet size in use can be larger.
+   - New tests cover the setting.
+   - Upstream tests whose inputs assumed the 1452-byte ceiling now size those inputs from
+     `MaxPacketBufferSize`, with every assertion kept: `send_stream_test.go`,
+     `integrationtests/self/zero_rtt_test.go` and `integrationtests/self/datagram_test.go`.
+   - `config_test.go` gives the new field a value in its every-field-set helper.
+2. **Module path.** Upstream's `github.com/quic-go/quic-go` becomes
+   `github.com/nol8io/quic-go`. It changes in every `go.mod` file and Go import, in the
+   generated mocks, and in the package paths in CI and build scripts. Links to upstream
+   issues, pull requests and documentation still point upstream.
+3. This section of the README.
+4. **Fork tooling.** `nol8/UPSTREAM` and `nol8/sync.sh`, which moves these changes to a new
+   upstream release.
+
+Nothing else changes. To see the full delta, fetch the upstream release named in
+`nol8/UPSTREAM`, without upstream's other tags, and compare it with `master`. Most of the
+delta is the module path.
+
+```
+git fetch --no-tags https://github.com/quic-go/quic-go.git refs/tags/vX.Y.Z:refs/upstream/vX.Y.Z
+git diff refs/upstream/vX.Y.Z master
+```
+
+Compare content, not history. `master`'s history starts on upstream's `master` branch at a
+commit later than v0.65.0, and v1.0.0 replaced that content with this fork's release.
+Upstream commits in `git log master` are therefore not necessarily in `master`; only
+`nol8/UPSTREAM` says which upstream release it contains.
+
+## Versions
+
+The fork has its own versions, `v1.Y.Z`, and keeps none of upstream's tags. Each release's
+tag message names the upstream release it's built on, as does `nol8/UPSTREAM` at that tag.
+
+| Version | Upstream release |
+| --- | --- |
+| `v1.0.0` | `v0.65.0`, the same code as the earlier tag `v0.65.0-nol8.1` |
+
+```
+go get github.com/nol8io/quic-go@v1.0.0
+```
+
+- A sync to a new upstream minor release is the next minor version. Upstream is still at
+  v0 and changes its API in minor releases, so a minor version here can too: read
+  upstream's release notes before upgrading.
+- A sync to an upstream patch release, or a fix of the fork's own, is the next patch
+  version.
+- The major version stays 1, because Go would require a v2 to change the module path to
+  `github.com/nol8io/quic-go/v2`.
+
+Releases are tagged on `master`. A fix to the current release is a pull request into
+`master`. A fix that an older release needs goes on a `rel_v1.Y` branch made from that
+release's last tag, and is tagged there as its next patch version.
+
+## Updating to a new upstream release
+
+Work in a clone of this repository that holds no upstream tags: `git tag -l` lists only
+this fork's tags. Never fetch upstream with its tags, and push branches with
+`--no-follow-tags`, so that no upstream tag can reach this repository.
+
+1. From a clean, up-to-date checkout of `master`, run `nol8/sync.sh vX.Y.Z`. It fetches
+   the two upstream releases it needs, without tags, and creates the local branch
+   `sync/vX.Y.Z`: upstream `vX.Y.Z` with the module rename, plus the nol8 changes, as one
+   commit on top of `master`. It merges the nol8 changes in and follows files that upstream
+   renamed.
+2. If the nol8 changes conflict with the new release, including in a file that upstream
+   deleted or a directory it renamed, the script stops and names the files. Resolve them
+   in the worktree it prints, stage the result with `git add` or `git rm`, and run
+   `nol8/sync.sh --finish <worktree>`. To give up instead, run the command it prints for
+   that.
+3. If the script lists files that still name `github.com/quic-go/quic-go` outside a URL,
+   check each one. Fix any that need the new path on the branch in step 4; later syncs
+   carry the fix as one of the nol8 changes. If a kind of file will keep needing it, add
+   it to `rename_module` in `nol8/sync.sh` through a separate pull request into `master`.
+4. On the branch, fix anything upstream's changes broke in the nol8 changes, and add the
+   new version to the table and the `go get` example above. Then run `go build ./...`, `go vet ./...`
+   and `go test -race ./...` in the root module, and `go vet ./...` in
+   `integrationtests/fips` and `integrationtests/gomodvendor`. Commit the fixes to the
+   branch.
+5. Push the branch with `git push --no-follow-tags origin sync/vX.Y.Z` and open a pull
+   request into `master`. After review, squash-merge it.
+6. Tag the merge commit with an annotated tag for the new version, naming the upstream
+   release in its message, and push only that tag, for example
+   `git push --no-follow-tags origin v1.1.0`, never `--tags`.
+
+## Ownership and security
+
+- **Owner:** the nol8 Data Path SDK team.
+- **Upstream security fixes:** applied within 7 days, released as the next patch version, or
+  by syncing to the upstream release that contains the fix.
+- **Advisory watch:** `govulncheck` doesn't map upstream advisories to this module path.
+  The owners therefore watch upstream security advisories and releases instead.
+- **Reporting:** report an issue in the fork's own change to the Data Path SDK team.
+  Report anything else to upstream, as described in [SECURITY.md](SECURITY.md).
+
+## End of life
+
+nol8 is proposing upstream that the maximum packet size become a configuration option.
+Once upstream supports it, the SDK and Argus move back to upstream quic-go and this
+repository is archived.
+
+---
+
 <div align="center" style="margin-bottom: 15px;">
   <img src="./assets/quic-go-logo.png" width="700" height="auto">
 </div>

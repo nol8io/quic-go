@@ -4,125 +4,132 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"testing"
 	"testing/synctest"
 	"time"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
-	"github.com/quic-go/quic-go/quicvarint"
+	"github.com/nol8io/quic-go"
+	quicproxy "github.com/nol8io/quic-go/integrationtests/tools/proxy"
+	"github.com/nol8io/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/qlog"
+	"github.com/nol8io/quic-go/qlogwriter"
+	"github.com/nol8io/quic-go/quicvarint"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestACKBundling(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		const numMsg = 100
+	const numMsg = 100
 
-		clientPacketConn, serverPacketConn, closeFn := newSimnetLink(t, 10*time.Millisecond)
-		defer closeFn(t)
+	serverCounter, serverTracer := newPacketTracer()
+	server, err := quic.Listen(
+		newUDPConnLocalhost(t),
+		getTLSConfig(),
+		getQuicConfig(&quic.Config{
+			DisablePathMTUDiscovery: true,
+			Tracer:                  func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace { return serverTracer },
+		}),
+	)
+	require.NoError(t, err)
+	defer server.Close()
 
-		serverCounter, serverTracer := newPacketTracer()
-		server, err := quic.Listen(
-			serverPacketConn,
-			getTLSConfig(),
-			getQuicConfig(&quic.Config{
-				DisablePathMTUDiscovery: true,
-				Tracer:                  func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace { return serverTracer },
-			}),
-		)
-		require.NoError(t, err)
-		defer server.Close()
+	proxy := quicproxy.Proxy{
+		Conn:       newUDPConnLocalhost(t),
+		ServerAddr: server.Addr().(*net.UDPAddr),
+		DelayPacket: func(quicproxy.Direction, net.Addr, net.Addr, []byte) time.Duration {
+			return 5 * time.Millisecond
+		},
+	}
+	require.NoError(t, proxy.Start())
+	defer proxy.Close()
 
-		clientCounter, clientTracer := newPacketTracer()
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		conn, err := quic.Dial(
-			ctx,
-			clientPacketConn,
-			serverPacketConn.LocalAddr(),
-			getTLSClientConfig(),
-			getQuicConfig(&quic.Config{
-				DisablePathMTUDiscovery: true,
-				Tracer:                  func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace { return clientTracer },
-			}),
-		)
-		require.NoError(t, err)
-		defer conn.CloseWithError(0, "")
+	clientCounter, clientTracer := newPacketTracer()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	conn, err := quic.Dial(
+		ctx,
+		newUDPConnLocalhost(t),
+		proxy.LocalAddr(),
+		getTLSClientConfig(),
+		getQuicConfig(&quic.Config{
+			DisablePathMTUDiscovery: true,
+			Tracer:                  func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace { return clientTracer },
+		}),
+	)
+	require.NoError(t, err)
+	defer conn.CloseWithError(0, "")
 
-		serverErrChan := make(chan error, 1)
-		go func() {
-			defer close(serverErrChan)
-			conn, err := server.Accept(context.Background())
-			if err != nil {
-				serverErrChan <- fmt.Errorf("accept failed: %w", err)
-				return
-			}
-			str, err := conn.AcceptStream(context.Background())
-			if err != nil {
-				serverErrChan <- fmt.Errorf("accept stream failed: %w", err)
-				return
-			}
-			b := make([]byte, 1)
-			// Echo every byte received from the client.
-			for {
-				if _, err := str.Read(b); err != nil {
-					break
-				}
-				_, err = str.Write(b)
-				if err != nil {
-					serverErrChan <- fmt.Errorf("write failed: %w", err)
-					return
-				}
-			}
-		}()
-
-		str, err := conn.OpenStreamSync(context.Background())
-		require.NoError(t, err)
-		b := make([]byte, 1)
-		// Send numMsg 1-byte messages.
-		for i := range numMsg {
-			_, err = str.Write([]byte{uint8(i)})
-			require.NoError(t, err)
-			_, err = str.Read(b)
-			require.NoError(t, err)
-			require.Equal(t, uint8(i), b[0])
-		}
-		require.NoError(t, conn.CloseWithError(0, ""))
-		require.NoError(t, <-serverErrChan)
-
-		countBundledPackets := func(packets []packet) (numBundled int) {
-			for _, p := range packets {
-				var hasAck, hasStreamFrame bool
-				for _, f := range p.frames {
-					switch f.Frame.(type) {
-					case *qlog.AckFrame:
-						hasAck = true
-					case *qlog.StreamFrame:
-						hasStreamFrame = true
-					}
-				}
-				if hasAck && hasStreamFrame {
-					numBundled++
-				}
-			}
+	serverErrChan := make(chan error, 1)
+	go func() {
+		defer close(serverErrChan)
+		conn, err := server.Accept(context.Background())
+		if err != nil {
+			serverErrChan <- fmt.Errorf("accept failed: %w", err)
 			return
 		}
+		str, err := conn.AcceptStream(context.Background())
+		if err != nil {
+			serverErrChan <- fmt.Errorf("accept stream failed: %w", err)
+			return
+		}
+		b := make([]byte, 1)
+		// Echo every byte received from the client.
+		for {
+			if _, err := str.Read(b); err != nil {
+				break
+			}
+			_, err = str.Write(b)
+			if err != nil {
+				serverErrChan <- fmt.Errorf("write failed: %w", err)
+				return
+			}
+		}
+	}()
 
-		numBundledIncoming := countBundledPackets(clientCounter.getRcvdShortHeaderPackets())
-		numBundledOutgoing := countBundledPackets(serverCounter.getRcvdShortHeaderPackets())
-		t.Logf("bundled incoming packets: %d / %d", numBundledIncoming, numMsg)
-		t.Logf("bundled outgoing packets: %d / %d", numBundledOutgoing, numMsg)
+	str, err := conn.OpenStreamSync(context.Background())
+	require.NoError(t, err)
+	b := make([]byte, 1)
+	// Send numMsg 1-byte messages.
+	for i := range numMsg {
+		_, err = str.Write([]byte{uint8(i)})
+		require.NoError(t, err)
+		_, err = str.Read(b)
+		require.NoError(t, err)
+		require.Equal(t, uint8(i), b[0])
+	}
+	require.NoError(t, conn.CloseWithError(0, ""))
+	require.NoError(t, <-serverErrChan)
 
-		require.LessOrEqual(t, numBundledIncoming, numMsg)
-		require.Greater(t, numBundledIncoming, numMsg*9/10)
-		require.LessOrEqual(t, numBundledOutgoing, numMsg)
-		require.Greater(t, numBundledOutgoing, numMsg*9/10)
-	})
+	countBundledPackets := func(packets []packet) (numBundled int) {
+		for _, p := range packets {
+			var hasAck, hasStreamFrame bool
+			for _, f := range p.frames {
+				switch f.Frame.(type) {
+				case *qlog.AckFrame:
+					hasAck = true
+				case *qlog.StreamFrame:
+					hasStreamFrame = true
+				}
+			}
+			if hasAck && hasStreamFrame {
+				numBundled++
+			}
+		}
+		return
+	}
+
+	numBundledIncoming := countBundledPackets(clientCounter.getRcvdShortHeaderPackets())
+	numBundledOutgoing := countBundledPackets(serverCounter.getRcvdShortHeaderPackets())
+	t.Logf("bundled incoming packets: %d / %d", numBundledIncoming, numMsg)
+	t.Logf("bundled outgoing packets: %d / %d", numBundledOutgoing, numMsg)
+
+	require.LessOrEqual(t, numBundledIncoming, numMsg)
+	require.Greater(t, numBundledIncoming, numMsg*9/10)
+	require.LessOrEqual(t, numBundledOutgoing, numMsg)
+	require.Greater(t, numBundledOutgoing, numMsg*9/10)
 }
 
 func TestStreamDataBlocked(t *testing.T) {

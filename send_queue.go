@@ -3,13 +3,12 @@ package quic
 import (
 	"net"
 
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/udp"
+	"github.com/nol8io/quic-go/internal/protocol"
 )
 
 type sender interface {
-	Send(p *udp.PacketBuffer, gsoSize uint16, ecn protocol.ECN)
-	SendProbe(*udp.PacketBuffer, net.Addr, udp.PacketInfo)
+	Send(p *packetBuffer, gsoSize uint16, ecn protocol.ECN)
+	SendProbe(*packetBuffer, net.Addr, packetInfo)
 	Run() error
 	WouldBlock() bool
 	Available() <-chan struct{}
@@ -17,7 +16,7 @@ type sender interface {
 }
 
 type queueEntry struct {
-	buf     *udp.PacketBuffer
+	buf     *packetBuffer
 	gsoSize uint16
 	ecn     protocol.ECN
 }
@@ -47,7 +46,7 @@ func newSendQueue(conn sendConn) sender {
 // Send sends out a packet. It's guaranteed to not block.
 // Callers need to make sure that there's actually space in the send queue by calling WouldBlock.
 // Otherwise Send will panic.
-func (h *sendQueue) Send(p *udp.PacketBuffer, gsoSize uint16, ecn protocol.ECN) {
+func (h *sendQueue) Send(p *packetBuffer, gsoSize uint16, ecn protocol.ECN) {
 	select {
 	case h.queue <- queueEntry{buf: p, gsoSize: gsoSize, ecn: ecn}:
 		// clear available channel if we've reached capacity
@@ -63,7 +62,7 @@ func (h *sendQueue) Send(p *udp.PacketBuffer, gsoSize uint16, ecn protocol.ECN) 
 	}
 }
 
-func (h *sendQueue) SendProbe(p *udp.PacketBuffer, addr net.Addr, info udp.PacketInfo) {
+func (h *sendQueue) SendProbe(p *packetBuffer, addr net.Addr, info packetInfo) {
 	h.conn.WriteTo(p.Data, addr, info)
 }
 
@@ -93,7 +92,7 @@ func (h *sendQueue) Run() error {
 				// 1. Checking for "datagram too large" message from the kernel, as such,
 				// 2. Path MTU discovery,and
 				// 3. Eventual detection of loss PingFrame.
-				if !udp.IsSendMsgSizeErr(err) {
+				if !isSendMsgSizeErr(err) {
 					return err
 				}
 			}

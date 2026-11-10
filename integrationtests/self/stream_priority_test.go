@@ -7,8 +7,8 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/testutils/simnet"
+	"github.com/nol8io/quic-go"
+	"github.com/nol8io/quic-go/testutils/simnet"
 
 	"github.com/stretchr/testify/require"
 )
@@ -36,6 +36,7 @@ func newStreamPriorityTestConnections(t *testing.T) (client, server *quic.Conn) 
 	}
 	clientPacketConn := n.NewEndpoint(&net.UDPAddr{IP: net.ParseIP("1.0.0.1"), Port: 9001}, linkSettings())
 	serverPacketConn := n.NewEndpoint(&net.UDPAddr{IP: net.ParseIP("1.0.0.2"), Port: 9002}, linkSettings())
+	require.NoError(t, n.Start())
 	t.Cleanup(func() {
 		require.NoError(t, clientPacketConn.Close())
 		require.NoError(t, serverPacketConn.Close())

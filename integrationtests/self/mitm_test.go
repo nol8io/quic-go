@@ -8,79 +8,32 @@ import (
 	"math"
 	mrand "math/rand/v2"
 	"net"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
-	"testing/synctest"
 	"time"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/testutils"
-	"github.com/quic-go/quic-go/testutils/simnet"
+	"github.com/nol8io/quic-go"
+	quicproxy "github.com/nol8io/quic-go/integrationtests/tools/proxy"
+	"github.com/nol8io/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/internal/wire"
+	"github.com/nol8io/quic-go/testutils"
 
 	"github.com/stretchr/testify/require"
 )
 
-const (
-	mitmTestConnIDLen = 6
-	mitmTestRTT       = 10 * time.Millisecond
-)
+const mitmTestConnIDLen = 6
 
-// mitmPacket is a packet that is delivered after Delay, in addition to the link latency.
-type mitmPacket struct {
-	simnet.Packet
-	Delay time.Duration
-}
-
-// mitmRouter delivers the packets returned by Intercept instead of the packet that was sent.
-type mitmRouter struct {
-	simnet.PerfectRouter
-
-	ServerAddr net.Addr
-	Intercept  func(dir direction, p simnet.Packet) []mitmPacket
-}
-
-var _ simnet.Router = &mitmRouter{}
-
-func (r *mitmRouter) SendPacket(p simnet.Packet) error {
-	dir := direction(directionToClient)
-	if p.To.String() == r.ServerAddr.String() {
-		dir = directionToServer
-	}
-	for _, mp := range r.Intercept(dir, p) {
-		if mp.Delay > 0 {
-			time.AfterFunc(mp.Delay, func() { r.PerfectRouter.SendPacket(mp.Packet) })
-			continue
-		}
-		if err := r.PerfectRouter.SendPacket(mp.Packet); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func getTransportsForMITMTest(
-	t *testing.T,
-	intercept func(dir direction, p simnet.Packet) []mitmPacket,
-) (serverTransport, clientTransport *quic.Transport) {
-	clientConn, serverConn, closeFn := newSimnetLinkWithRouter(t, mitmTestRTT, &mitmRouter{
-		ServerAddr: &net.UDPAddr{IP: net.ParseIP("1.0.0.2"), Port: 9002},
-		Intercept:  intercept,
-	})
-	t.Cleanup(func() { closeFn(t) })
-
+func getTransportsForMITMTest(t *testing.T) (serverTransport, clientTransport *quic.Transport) {
 	serverTransport = &quic.Transport{
-		Conn:               serverConn,
+		Conn:               newUDPConnLocalhost(t),
 		ConnectionIDLength: mitmTestConnIDLen,
 	}
 	addTracer(serverTransport)
 	t.Cleanup(func() { serverTransport.Close() })
 
 	clientTransport = &quic.Transport{
-		Conn:               clientConn,
+		Conn:               newUDPConnLocalhost(t),
 		ConnectionIDLength: mitmTestConnIDLen,
 	}
 	addTracer(clientTransport)
@@ -91,35 +44,35 @@ func getTransportsForMITMTest(
 
 func TestMITMInjectRandomPackets(t *testing.T) {
 	t.Run("towards the server", func(t *testing.T) {
-		testMITMInjectRandomPackets(t, directionToServer)
+		testMITMInjectRandomPackets(t, quicproxy.DirectionIncoming)
 	})
 
 	t.Run("towards the client", func(t *testing.T) {
-		testMITMInjectRandomPackets(t, directionToClient)
+		testMITMInjectRandomPackets(t, quicproxy.DirectionOutgoing)
 	})
 }
 
 func TestMITMDuplicatePackets(t *testing.T) {
 	t.Run("towards the server", func(t *testing.T) {
-		testMITMDuplicatePackets(t, directionToServer)
+		testMITMDuplicatePackets(t, quicproxy.DirectionIncoming)
 	})
 
 	t.Run("towards the client", func(t *testing.T) {
-		testMITMDuplicatePackets(t, directionToClient)
+		testMITMDuplicatePackets(t, quicproxy.DirectionOutgoing)
 	})
 }
 
 func TestMITCorruptPackets(t *testing.T) {
 	t.Run("towards the server", func(t *testing.T) {
-		testMITMCorruptPackets(t, directionToServer)
+		testMITMCorruptPackets(t, quicproxy.DirectionIncoming)
 	})
 
 	t.Run("towards the client", func(t *testing.T) {
-		testMITMCorruptPackets(t, directionToClient)
+		testMITMCorruptPackets(t, quicproxy.DirectionOutgoing)
 	})
 }
 
-func testMITMInjectRandomPackets(t *testing.T, dir direction) {
+func testMITMInjectRandomPackets(t *testing.T, direction quicproxy.Direction) {
 	createRandomPacketOfSameType := func(b []byte) []byte {
 		if wire.IsLongHeaderPacket(b[0]) {
 			hdr, _, _, err := wire.ParsePacket(b)
@@ -165,75 +118,103 @@ func testMITMInjectRandomPackets(t *testing.T, dir direction) {
 		return append(data, r...)
 	}
 
-	synctest.Test(t, func(t *testing.T) {
-		serverTransport, clientTransport := getTransportsForMITMTest(t, func(d direction, p simnet.Packet) []mitmPacket {
-			packets := []mitmPacket{{Packet: p}}
-			if d != dir {
-				return packets
-			}
+	rtt := scaleDuration(10 * time.Millisecond)
+	serverTransport, clientTransport := getTransportsForMITMTest(t)
+
+	dropCallback := func(dir quicproxy.Direction, _, _ net.Addr, b []byte) bool {
+		if dir != direction {
+			return false
+		}
+		go func() {
+			ticker := time.NewTicker(rtt / 10)
+			defer ticker.Stop()
 			for range 10 {
-				packets = append(packets, mitmPacket{
-					Packet: simnet.Packet{From: p.From, To: p.To, Data: createRandomPacketOfSameType(p.Data)},
-					Delay:  mrand.N(mitmTestRTT),
-				})
+				switch direction {
+				case quicproxy.DirectionIncoming:
+					clientTransport.WriteTo(createRandomPacketOfSameType(b), serverTransport.Conn.LocalAddr())
+				case quicproxy.DirectionOutgoing:
+					serverTransport.WriteTo(createRandomPacketOfSameType(b), clientTransport.Conn.LocalAddr())
+				}
+				<-ticker.C
 			}
-			return packets
-		})
-		runMITMTest(t, serverTransport, clientTransport)
-	})
+		}()
+		return false
+	}
+
+	runMITMTest(t, serverTransport, clientTransport, rtt, dropCallback)
 }
 
-func testMITMDuplicatePackets(t *testing.T, dir direction) {
-	synctest.Test(t, func(t *testing.T) {
-		serverTransport, clientTransport := getTransportsForMITMTest(t, func(d direction, p simnet.Packet) []mitmPacket {
-			if d != dir {
-				return []mitmPacket{{Packet: p}}
-			}
-			return []mitmPacket{
-				{Packet: p},
-				{Packet: simnet.Packet{From: p.From, To: p.To, Data: slices.Clone(p.Data)}, Delay: mrand.N(mitmTestRTT)},
-			}
-		})
-		runMITMTest(t, serverTransport, clientTransport)
-	})
+func testMITMDuplicatePackets(t *testing.T, direction quicproxy.Direction) {
+	serverTransport, clientTransport := getTransportsForMITMTest(t)
+	rtt := scaleDuration(10 * time.Millisecond)
+
+	dropCallback := func(dir quicproxy.Direction, _, _ net.Addr, b []byte) bool {
+		if dir != direction {
+			return false
+		}
+		switch direction {
+		case quicproxy.DirectionIncoming:
+			clientTransport.WriteTo(b, serverTransport.Conn.LocalAddr())
+		case quicproxy.DirectionOutgoing:
+			serverTransport.WriteTo(b, clientTransport.Conn.LocalAddr())
+		}
+		return false
+	}
+
+	runMITMTest(t, serverTransport, clientTransport, rtt, dropCallback)
 }
 
-func testMITMCorruptPackets(t *testing.T, dir direction) {
-	synctest.Test(t, func(t *testing.T) {
-		var numCorrupted atomic.Int32
-		serverTransport, clientTransport := getTransportsForMITMTest(t, func(d direction, p simnet.Packet) []mitmPacket {
-			if d != dir {
-				return []mitmPacket{{Packet: p}}
-			}
-			isLongHeaderPacket := wire.IsLongHeaderPacket(p.Data[0])
-			// corrupt 20% of long header packets and 5% of short header packets
-			if isLongHeaderPacket && mrand.IntN(4) != 0 {
-				return []mitmPacket{{Packet: p}}
-			}
-			if !isLongHeaderPacket && mrand.IntN(20) != 0 {
-				return []mitmPacket{{Packet: p}}
-			}
-			numCorrupted.Add(1)
-			p.Data = slices.Clone(p.Data)
-			p.Data[mrand.IntN(len(p.Data))] = byte(mrand.IntN(256))
-			return []mitmPacket{{Packet: p}}
-		})
+func testMITMCorruptPackets(t *testing.T, direction quicproxy.Direction) {
+	serverTransport, clientTransport := getTransportsForMITMTest(t)
+	rtt := scaleDuration(5 * time.Millisecond)
 
-		runMITMTest(t, serverTransport, clientTransport)
-		t.Logf("corrupted %d packets", numCorrupted.Load())
-		require.NotZero(t, int(numCorrupted.Load()))
-	})
+	var numCorrupted atomic.Int32
+	dropCallback := func(dir quicproxy.Direction, _, _ net.Addr, b []byte) bool {
+		if dir != direction {
+			return false
+		}
+		isLongHeaderPacket := wire.IsLongHeaderPacket(b[0])
+		// corrupt 20% of long header packets and 5% of short header packets
+		if isLongHeaderPacket && mrand.IntN(4) != 0 {
+			return false
+		}
+		if !isLongHeaderPacket && mrand.IntN(20) != 0 {
+			return false
+		}
+		numCorrupted.Add(1)
+		pos := mrand.IntN(len(b))
+		b[pos] = byte(mrand.IntN(256))
+		switch direction {
+		case quicproxy.DirectionIncoming:
+			clientTransport.WriteTo(b, serverTransport.Conn.LocalAddr())
+		case quicproxy.DirectionOutgoing:
+			serverTransport.WriteTo(b, clientTransport.Conn.LocalAddr())
+		}
+		return true
+	}
+
+	runMITMTest(t, serverTransport, clientTransport, rtt, dropCallback)
+	t.Logf("corrupted %d packets", numCorrupted.Load())
+	require.NotZero(t, int(numCorrupted.Load()))
 }
 
-func runMITMTest(t *testing.T, serverTr, clientTr *quic.Transport) {
+func runMITMTest(t *testing.T, serverTr, clientTr *quic.Transport, rtt time.Duration, dropCb quicproxy.DropCallback) {
 	ln, err := serverTr.Listen(getTLSConfig(), getQuicConfig(nil))
 	require.NoError(t, err)
 	defer ln.Close()
 
-	// corrupted handshake packets can lead to multiple PTOs with exponential backoff
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	proxy := quicproxy.Proxy{
+		Conn:        newUDPConnLocalhost(t),
+		ServerAddr:  ln.Addr().(*net.UDPAddr),
+		DelayPacket: func(quicproxy.Direction, net.Addr, net.Addr, []byte) time.Duration { return rtt / 2 },
+		DropPacket:  dropCb,
+	}
+	require.NoError(t, proxy.Start())
+	defer proxy.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), scaleDuration(time.Second))
 	defer cancel()
-	conn, err := clientTr.Dial(ctx, ln.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+	conn, err := clientTr.Dial(ctx, proxy.LocalAddr(), getTLSClientConfig(), getQuicConfig(nil))
 	require.NoError(t, err)
 	defer conn.CloseWithError(0, "")
 
@@ -282,82 +263,84 @@ func runMITMTest(t *testing.T, serverTr, clientTr *quic.Transport) {
 }
 
 func TestMITMForgedVersionNegotiationPacket(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		const supportedVersion protocol.Version = 42
+	serverTransport, clientTransport := getTransportsForMITMTest(t)
+	rtt := scaleDuration(10 * time.Millisecond)
 
-		var once sync.Once
-		serverTransport, clientTransport := getTransportsForMITMTest(t, func(d direction, p simnet.Packet) []mitmPacket {
-			packets := []mitmPacket{{Packet: p}}
-			if d != directionToServer {
-				return packets
+	const supportedVersion protocol.Version = 42
+
+	var once sync.Once
+	delayCb := func(dir quicproxy.Direction, _, _ net.Addr, raw []byte) time.Duration {
+		if dir != quicproxy.DirectionIncoming {
+			return rtt / 2
+		}
+		once.Do(func() {
+			hdr, _, _, err := wire.ParsePacket(raw)
+			if err != nil {
+				panic("failed to parse packet: " + err.Error())
 			}
-			once.Do(func() {
-				hdr, _, _, err := wire.ParsePacket(p.Data)
-				if err != nil {
-					panic("failed to parse packet: " + err.Error())
-				}
-				// create fake version negotiation packet with a fake supported version
-				packet := wire.ComposeVersionNegotiation(
-					protocol.ArbitraryLenConnectionID(hdr.SrcConnectionID.Bytes()),
-					protocol.ArbitraryLenConnectionID(hdr.DestConnectionID.Bytes()),
-					[]protocol.Version{supportedVersion},
-				)
-				packets = append(packets, mitmPacket{Packet: simnet.Packet{From: p.To, To: p.From, Data: packet}})
-			})
-			return packets
+			// create fake version negotiation packet with a fake supported version
+			packet := wire.ComposeVersionNegotiation(
+				protocol.ArbitraryLenConnectionID(hdr.SrcConnectionID.Bytes()),
+				protocol.ArbitraryLenConnectionID(hdr.DestConnectionID.Bytes()),
+				[]protocol.Version{supportedVersion},
+			)
+			if _, err := serverTransport.WriteTo(packet, clientTransport.Conn.LocalAddr()); err != nil {
+				panic("failed to write packet: " + err.Error())
+			}
 		})
+		return rtt / 2
+	}
 
-		err := runMITMTestSuccessful(t, serverTransport, clientTransport)
-		var vnErr *quic.VersionNegotiationError
-		require.ErrorAs(t, err, &vnErr)
-		require.Contains(t, vnErr.Theirs, supportedVersion) // might contain greased versions
-	})
+	err := runMITMTestSuccessful(t, serverTransport, clientTransport, delayCb)
+	var vnErr *quic.VersionNegotiationError
+	require.ErrorAs(t, err, &vnErr)
+	require.Contains(t, vnErr.Theirs, supportedVersion) // might contain greased versions
 }
 
 // times out, because client doesn't accept subsequent real retry packets from server
 // as it has already accepted a retry.
 // TODO: determine behavior when server does not send Retry packets
 func TestMITMForgedRetryPacket(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		var once sync.Once
-		serverTransport, clientTransport := getTransportsForMITMTest(t, func(d direction, p simnet.Packet) []mitmPacket {
-			packets := []mitmPacket{{Packet: p}}
-			hdr, _, _, err := wire.ParsePacket(p.Data)
-			if err != nil {
-				panic("failed to parse packet: " + err.Error())
-			}
-			if d == directionToServer && hdr.Type == protocol.PacketTypeInitial {
-				once.Do(func() {
-					fakeSrcConnID := protocol.ParseConnectionID([]byte{0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12})
-					retryPacket := testutils.ComposeRetryPacket(fakeSrcConnID, hdr.SrcConnectionID, hdr.DestConnectionID, []byte("token"), hdr.Version)
-					packets = append(packets, mitmPacket{Packet: simnet.Packet{From: p.To, To: p.From, Data: retryPacket}})
-				})
-			}
-			return packets
-		})
-		serverTransport.VerifySourceAddress = func(net.Addr) bool { return true }
+	serverTransport, clientTransport := getTransportsForMITMTest(t)
+	serverTransport.VerifySourceAddress = func(net.Addr) bool { return true }
+	rtt := scaleDuration(10 * time.Millisecond)
 
-		err := runMITMTestSuccessful(t, serverTransport, clientTransport)
-		var nerr net.Error
-		require.ErrorAs(t, err, &nerr)
-		require.True(t, nerr.Timeout())
-	})
+	var once sync.Once
+	delayCb := func(dir quicproxy.Direction, _, _ net.Addr, raw []byte) time.Duration {
+		hdr, _, _, err := wire.ParsePacket(raw)
+		if err != nil {
+			panic("failed to parse packet: " + err.Error())
+		}
+		if dir == quicproxy.DirectionIncoming && hdr.Type == protocol.PacketTypeInitial {
+			once.Do(func() {
+				fakeSrcConnID := protocol.ParseConnectionID([]byte{0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12})
+				retryPacket := testutils.ComposeRetryPacket(fakeSrcConnID, hdr.SrcConnectionID, hdr.DestConnectionID, []byte("token"), hdr.Version)
+				if _, err := serverTransport.WriteTo(retryPacket, clientTransport.Conn.LocalAddr()); err != nil {
+					panic("failed to write packet: " + err.Error())
+				}
+			})
+		}
+		return rtt / 2
+	}
+	err := runMITMTestSuccessful(t, serverTransport, clientTransport, delayCb)
+	var nerr net.Error
+	require.ErrorAs(t, err, &nerr)
+	require.True(t, nerr.Timeout())
 }
 
 func TestMITMForgedInitialPacket(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		var once sync.Once
-		serverTransport, clientTransport := getTransportsForMITMTest(t, func(d direction, p simnet.Packet) []mitmPacket {
-			packets := []mitmPacket{{Packet: p}}
-			if d != directionToServer {
-				return packets
-			}
-			hdr, _, _, err := wire.ParsePacket(p.Data)
+	serverTransport, clientTransport := getTransportsForMITMTest(t)
+	rtt := scaleDuration(10 * time.Millisecond)
+
+	var once sync.Once
+	delayCb := func(dir quicproxy.Direction, _, _ net.Addr, raw []byte) time.Duration {
+		if dir == quicproxy.DirectionIncoming {
+			hdr, _, _, err := wire.ParsePacket(raw)
 			if err != nil {
 				panic("failed to parse packet: " + err.Error())
 			}
 			if hdr.Type != protocol.PacketTypeInitial {
-				return packets
+				return 0
 			}
 			once.Do(func() {
 				initialPacket := testutils.ComposeInitialPacket(
@@ -369,32 +352,32 @@ func TestMITMForgedInitialPacket(t *testing.T) {
 					protocol.PerspectiveServer,
 					hdr.Version,
 				)
-				packets = append(packets, mitmPacket{Packet: simnet.Packet{From: p.To, To: p.From, Data: initialPacket}})
+				if _, err := serverTransport.WriteTo(initialPacket, clientTransport.Conn.LocalAddr()); err != nil {
+					panic("failed to write packet: " + err.Error())
+				}
 			})
-			return packets
-		})
-
-		err := runMITMTestSuccessful(t, serverTransport, clientTransport)
-		var nerr net.Error
-		require.ErrorAs(t, err, &nerr)
-		require.True(t, nerr.Timeout())
-	})
+		}
+		return rtt / 2
+	}
+	err := runMITMTestSuccessful(t, serverTransport, clientTransport, delayCb)
+	var nerr net.Error
+	require.ErrorAs(t, err, &nerr)
+	require.True(t, nerr.Timeout())
 }
 
 func TestMITMForgedInitialPacketWithAck(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		var once sync.Once
-		serverTransport, clientTransport := getTransportsForMITMTest(t, func(d direction, p simnet.Packet) []mitmPacket {
-			packets := []mitmPacket{{Packet: p}}
-			if d != directionToServer {
-				return packets
-			}
-			hdr, _, _, err := wire.ParsePacket(p.Data)
+	serverTransport, clientTransport := getTransportsForMITMTest(t)
+	rtt := scaleDuration(10 * time.Millisecond)
+
+	var once sync.Once
+	delayCb := func(dir quicproxy.Direction, _, _ net.Addr, raw []byte) time.Duration {
+		if dir == quicproxy.DirectionIncoming {
+			hdr, _, _, err := wire.ParsePacket(raw)
 			if err != nil {
 				panic("failed to parse packet: " + err.Error())
 			}
 			if hdr.Type != protocol.PacketTypeInitial {
-				return packets
+				return 0
 			}
 			once.Do(func() {
 				// Fake Initial with ACK for packet 2 (unsent)
@@ -408,28 +391,38 @@ func TestMITMForgedInitialPacketWithAck(t *testing.T) {
 					protocol.PerspectiveServer,
 					hdr.Version,
 				)
-				packets = append(packets, mitmPacket{Packet: simnet.Packet{From: p.To, To: p.From, Data: initialPacket}})
+				if _, err := serverTransport.WriteTo(initialPacket, clientTransport.Conn.LocalAddr()); err != nil {
+					panic("failed to write packet: " + err.Error())
+				}
 			})
-			return packets
-		})
+		}
+		return rtt / 2
+	}
 
-		err := runMITMTestSuccessful(t, serverTransport, clientTransport)
-		var transportErr *quic.TransportError
-		require.ErrorAs(t, err, &transportErr)
-		require.Equal(t, quic.ProtocolViolation, transportErr.ErrorCode)
-		require.Contains(t, transportErr.ErrorMessage, "received ACK for an unsent packet")
-	})
+	err := runMITMTestSuccessful(t, serverTransport, clientTransport, delayCb)
+	var transportErr *quic.TransportError
+	require.ErrorAs(t, err, &transportErr)
+	require.Equal(t, quic.ProtocolViolation, transportErr.ErrorCode)
+	require.Contains(t, transportErr.ErrorMessage, "received ACK for an unsent packet")
 }
 
-func runMITMTestSuccessful(t *testing.T, serverTransport, clientTransport *quic.Transport) error {
+func runMITMTestSuccessful(t *testing.T, serverTransport, clientTransport *quic.Transport, delayCb quicproxy.DelayCallback) error {
 	t.Helper()
 	ln, err := serverTransport.Listen(getTLSConfig(), getQuicConfig(nil))
 	require.NoError(t, err)
 	defer ln.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	proxy := quicproxy.Proxy{
+		Conn:        newUDPConnLocalhost(t),
+		ServerAddr:  ln.Addr().(*net.UDPAddr),
+		DelayPacket: delayCb,
+	}
+	require.NoError(t, proxy.Start())
+	defer proxy.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), scaleDuration(50*time.Millisecond))
 	defer cancel()
-	_, err = clientTransport.Dial(ctx, ln.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+	_, err = clientTransport.Dial(ctx, proxy.LocalAddr(), getTLSClientConfig(), getQuicConfig(nil))
 	require.Error(t, err)
 	return err
 }

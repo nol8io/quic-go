@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go/http3"
+	"github.com/nol8io/quic-go/http3"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,8 +21,7 @@ func TestHTTPClientTrace(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 		w.WriteHeader(http.StatusContinue)
 	})
-	// This test uses real sockets, since it traces the DNS lookup and dialing of the http3.Transport.
-	port := startHTTPServer(t, newUDPConnLocalhost(t), mux)
+	port := startHTTPServer(t, mux)
 
 	buf := make([]byte, 1)
 	type event struct {

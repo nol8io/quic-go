@@ -9,10 +9,10 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/nol8io/quic-go/http3/qlog"
+	"github.com/nol8io/quic-go/testutils/events"
 	ossfuzzseeds "github.com/quic-go/go-ossfuzz-seeds"
 	"github.com/quic-go/qpack"
-	"github.com/quic-go/quic-go/http3/qlog"
-	"github.com/quic-go/quic-go/testutils/events"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"

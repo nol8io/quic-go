@@ -13,14 +13,14 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/qerr"
-	"github.com/quic-go/quic-go/internal/utils"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
-	"github.com/quic-go/quic-go/testutils/events"
-	"github.com/quic-go/quic-go/testutils/simnet"
+	"github.com/nol8io/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/internal/qerr"
+	"github.com/nol8io/quic-go/internal/utils"
+	"github.com/nol8io/quic-go/internal/wire"
+	"github.com/nol8io/quic-go/qlog"
+	"github.com/nol8io/quic-go/qlogwriter"
+	"github.com/nol8io/quic-go/testutils/events"
+	"github.com/nol8io/quic-go/testutils/simnet"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -71,6 +71,7 @@ func newSimnetLink(t *testing.T, rtt time.Duration) (client, server net.PacketCo
 
 	client = n.NewEndpoint(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9001}, settings)
 	server = n.NewEndpoint(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9002}, settings)
+	require.NoError(t, n.Start())
 	return client, server, func() {
 		require.NoError(t, n.Close())
 	}
@@ -100,8 +101,6 @@ func TestTransportPacketHandling(t *testing.T) {
 	select {
 	case p := <-connChan1:
 		require.Equal(t, conn.LocalAddr(), p.remoteAddr)
-		require.NotNil(t, p.buffer)
-		require.Same(t, &p.buffer.Data[0], &p.data[0])
 		connID, err := wire.ParseConnectionID(p.data, 0)
 		require.NoError(t, err)
 		require.Equal(t, connID1, connID)

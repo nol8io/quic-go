@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nol8io/quic-go"
+	"github.com/nol8io/quic-go/qlogwriter"
 	"github.com/quic-go/qpack"
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/qlogwriter"
 )
 
 const (

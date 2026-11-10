@@ -14,12 +14,12 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
-	"github.com/quic-go/quic-go/testutils/simnet"
+	"github.com/nol8io/quic-go"
+	"github.com/nol8io/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/internal/wire"
+	"github.com/nol8io/quic-go/qlog"
+	"github.com/nol8io/quic-go/qlogwriter"
+	"github.com/nol8io/quic-go/testutils/simnet"
 
 	"github.com/stretchr/testify/require"
 )
@@ -758,7 +758,9 @@ func Test0RTTRejectedOnConnectionWindowDecrease(t *testing.T) {
 		str, err := conn.OpenStream()
 		require.NoError(t, err)
 		str.SetWriteDeadline(time.Now().Add(time.Second))
-		n, err := str.Write(make([]byte, 2000))
+		// Still larger than the stream buffer after the 99-byte connection window is sent,
+		// so Write stays blocked until the deadline instead of copying the tail.
+		n, err := str.Write(make([]byte, protocol.MaxPacketBufferSize+2000))
 		require.ErrorIs(t, err, os.ErrDeadlineExceeded)
 		require.Equal(t, newConnFlowControlWindow, n)
 
@@ -1045,6 +1047,7 @@ func Test0RTTPacketQueueing(t *testing.T) {
 		}
 		clientConn := n.NewEndpoint(&net.UDPAddr{IP: net.ParseIP("1.0.0.1"), Port: 9001}, settings)
 		serverConn := n.NewEndpoint(serverAddr, settings)
+		require.NoError(t, n.Start())
 		defer func() {
 			require.NoError(t, clientConn.Close())
 			require.NoError(t, serverConn.Close())

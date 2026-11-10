@@ -11,12 +11,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/udp"
-	"github.com/quic-go/quic-go/internal/utils"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
+	"github.com/nol8io/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/internal/utils"
+	"github.com/nol8io/quic-go/internal/wire"
+	"github.com/nol8io/quic-go/qlog"
+	"github.com/nol8io/quic-go/qlogwriter"
 )
 
 // ErrTransportClosed is returned by [Transport.Listen], [Transport.ListenEarly], [Transport.Dial],
@@ -46,14 +45,8 @@ var errListenerAlreadySet = errors.New("listener already set")
 type closePacket struct {
 	payload []byte
 	addr    net.Addr
-	info    udp.PacketInfo
+	info    packetInfo
 }
-
-// OOBCapablePacketConn is a connection that allows the reading of ECN bits from the IP header.
-// If the PacketConn passed to the [Transport] satisfies this interface, quic-go will use it.
-// In this case, packets will be read in batches, and [OOBCapablePacketConn.WriteMsgUDP]
-// will be used instead of [net.PacketConn.WriteTo] to write packets.
-type OOBCapablePacketConn = udp.OOBCapablePacketConn
 
 // The Transport is the central point to manage incoming and outgoing QUIC connections.
 // QUIC demultiplexes connections based on their QUIC Connection IDs, not based on the 4-tuple.
@@ -160,7 +153,7 @@ type Transport struct {
 
 	server *baseServer
 
-	conn udp.Conn
+	conn rawConn
 
 	closeQueue          chan closePacket
 	statelessResetQueue chan receivedPacket
@@ -264,7 +257,7 @@ func (t *Transport) dial(ctx context.Context, addr net.Addr, host string, tlsCon
 	tlsConf = tlsConf.Clone()
 	setTLSConfigServerName(tlsConf, addr, host)
 	return t.doDial(ctx,
-		newSendConn(t.conn, addr, udp.PacketInfo{}, utils.DefaultLogger),
+		newSendConn(t.conn, addr, packetInfo{}, utils.DefaultLogger),
 		tlsConf,
 		conf,
 		0,
@@ -383,10 +376,16 @@ func (t *Transport) doDial(
 
 func (t *Transport) init(allowZeroLengthConnIDs bool) error {
 	t.initOnce.Do(func() {
-		conn, err := udp.Wrap(t.Conn)
-		if err != nil {
-			t.initErr = err
-			return
+		var conn rawConn
+		if c, ok := t.Conn.(rawConn); ok {
+			conn = c
+		} else {
+			var err error
+			conn, err = wrapConn(t.Conn)
+			if err != nil {
+				t.initErr = err
+				return
+			}
 		}
 
 		t.logger = utils.DefaultLogger // TODO: make this configurable
@@ -524,7 +523,10 @@ func (t *Transport) close(e error) {
 	}
 }
 
-func (t *Transport) listen(conn udp.Conn) {
+// only print warnings about the UDP receive buffer size once
+var setBufferWarningOnce sync.Once
+
+func (t *Transport) listen(conn rawConn) {
 	for {
 		p, err := conn.ReadPacket()
 		//nolint:staticcheck // SA1019 ignore this!
@@ -543,20 +545,13 @@ func (t *Transport) listen(conn udp.Conn) {
 		}
 		if err != nil {
 			// Windows returns an error when receiving a UDP datagram that doesn't fit into the provided buffer.
-			if udp.IsRecvMsgSizeErr(err) {
+			if isRecvMsgSizeErr(err) {
 				continue
 			}
 			t.close(err)
 			return
 		}
-		t.handlePacket(receivedPacket{
-			buffer:     p.Buffer,
-			remoteAddr: p.RemoteAddr,
-			rcvTime:    p.RcvTime,
-			data:       p.Data,
-			ecn:        p.ECN,
-			info:       p.Info,
-		})
+		t.handlePacket(p)
 	}
 }
 
@@ -839,7 +834,7 @@ func (h *packetHandlerMap) ReplaceWithClosed(ids []protocol.ConnectionID, connCl
 	var handler packetHandler
 	if connClosePacket != nil {
 		handler = newClosedLocalConn(
-			func(addr net.Addr, info udp.PacketInfo) {
+			func(addr net.Addr, info packetInfo) {
 				select {
 				case h.closeQueue <- closePacket{payload: connClosePacket, addr: addr, info: info}:
 				default:

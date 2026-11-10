@@ -10,16 +10,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/handshake"
-	"github.com/quic-go/quic-go/internal/monotime"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/qerr"
-	"github.com/quic-go/quic-go/internal/udp"
-	"github.com/quic-go/quic-go/internal/utils"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
-	"github.com/quic-go/quic-go/testutils/events"
+	"github.com/nol8io/quic-go/internal/handshake"
+	"github.com/nol8io/quic-go/internal/monotime"
+	"github.com/nol8io/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/internal/qerr"
+	"github.com/nol8io/quic-go/internal/utils"
+	"github.com/nol8io/quic-go/internal/wire"
+	"github.com/nol8io/quic-go/qlog"
+	"github.com/nol8io/quic-go/qlogwriter"
+	"github.com/nol8io/quic-go/testutils/events"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -60,7 +59,7 @@ type serverOpts struct {
 
 func newTestServer(t *testing.T, serverOpts *serverOpts) *testServer {
 	t.Helper()
-	c, err := udp.Wrap(newUDPConnLocalhost(t))
+	c, err := wrapConn(newUDPConnLocalhost(t))
 	require.NoError(t, err)
 	verifySourceAddress := func(net.Addr) bool { return serverOpts.useRetry }
 	config := populateConfig(serverOpts.config)
@@ -326,7 +325,7 @@ func TestServerPacketDropping(t *testing.T) {
 			receivedPacket{
 				remoteAddr: conn.LocalAddr(),
 				data:       data,
-				buffer:     udp.GetPacketBuffer(),
+				buffer:     getPacketBuffer(),
 			},
 			0, // version negotiation packets don't have a version
 			qlog.PacketTypeVersionNegotiation,

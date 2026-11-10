@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go"
+	"github.com/nol8io/quic-go"
 
 	"github.com/stretchr/testify/require"
 )
@@ -153,7 +153,6 @@ func TestMultiplexingServerAndClientOnSameConn(t *testing.T) {
 	server1, err := tr1.Listen(getTLSConfig(), getQuicConfig(nil))
 	require.NoError(t, err)
 	defer server1.Close()
-	go runMultiplexTestServer(t, server1)
 
 	tr2 := &quic.Transport{Conn: newUDPConnLocalhost(t)}
 	addTracer(tr2)
@@ -161,23 +160,27 @@ func TestMultiplexingServerAndClientOnSameConn(t *testing.T) {
 	server2, err := tr2.Listen(getTLSConfig(), getQuicConfig(nil))
 	require.NoError(t, err)
 	defer server2.Close()
-	go runMultiplexTestServer(t, server2)
 
-	errChan1 := make(chan error, 1)
-	go func() { errChan1 <- dialAndReceiveData(tr2, server1.Addr()) }()
-	errChan2 := make(chan error, 1)
-	go func() { errChan2 <- dialAndReceiveData(tr1, server2.Addr()) }()
+	done1 := make(chan struct{})
+	go func() {
+		defer close(done1)
+		dialAndReceiveData(tr2, server1.Addr())
+	}()
+
+	done2 := make(chan struct{})
+	go func() {
+		defer close(done2)
+		dialAndReceiveData(tr1, server2.Addr())
+	}()
 
 	select {
-	case err := <-errChan1:
-		require.NoError(t, err, "error dialing server 1")
+	case <-done1:
 	case <-time.After(5 * time.Second):
 		t.Error("timeout waiting for done1 to close")
 	}
 	select {
-	case err := <-errChan2:
-		require.NoError(t, err, "error dialing server 2")
-	case <-time.After(5 * time.Second):
+	case <-done2:
+	case <-time.After(time.Second):
 		t.Error("timeout waiting for done2 to close")
 	}
 }

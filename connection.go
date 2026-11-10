@@ -2,7 +2,6 @@ package quic
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -16,16 +15,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/ackhandler"
-	"github.com/quic-go/quic-go/internal/handshake"
-	"github.com/quic-go/quic-go/internal/monotime"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/qerr"
-	"github.com/quic-go/quic-go/internal/udp"
-	"github.com/quic-go/quic-go/internal/utils"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
+	"github.com/nol8io/quic-go/internal/ackhandler"
+	"github.com/nol8io/quic-go/internal/handshake"
+	"github.com/nol8io/quic-go/internal/monotime"
+	"github.com/nol8io/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/internal/qerr"
+	"github.com/nol8io/quic-go/internal/utils"
+	"github.com/nol8io/quic-go/internal/wire"
+	"github.com/nol8io/quic-go/qlog"
+	"github.com/nol8io/quic-go/qlogwriter"
 )
 
 type unpacker interface {
@@ -47,7 +45,7 @@ type cryptoStreamHandler interface {
 }
 
 type receivedPacket struct {
-	buffer *udp.PacketBuffer
+	buffer *packetBuffer
 
 	remoteAddr net.Addr
 	rcvTime    monotime.Time
@@ -55,7 +53,7 @@ type receivedPacket struct {
 
 	ecn protocol.ECN
 
-	info udp.PacketInfo // only valid if the contained IP address is valid
+	info packetInfo // only valid if the contained IP address is valid
 }
 
 type receivedPacketWithChecksum struct {
@@ -223,6 +221,9 @@ type Conn struct {
 	pacingDeadline monotime.Time
 
 	peerParams *wire.TransportParameters
+	// peerMaxUDPPayloadSize is peerParams.MaxUDPPayloadSize once applied, for
+	// MaxUDPPayloadLimits, which other goroutines call.
+	peerMaxUDPPayloadSize atomic.Int64
 
 	timer *time.Timer
 	// keepAlivePingSent stores whether a keep alive PING is in flight.
@@ -343,7 +344,7 @@ var newConnection = func(
 		MaxUniStreamNum:                 protocol.StreamNum(s.config.MaxIncomingUniStreams),
 		MaxAckDelay:                     ackhandler.MaxAckDelay + protocol.TimerGranularity,
 		AckDelayExponent:                protocol.AckDelayExponent,
-		MaxUDPPayloadSize:               protocol.MaxPacketBufferSize,
+		MaxUDPPayloadSize:               s.config.maxUDPPayloadSize(),
 		StatelessResetToken:             &statelessResetToken,
 		OriginalDestinationConnectionID: origDestConnID,
 		// For interoperability with quic-go versions before May 2023, this value must be set to a value
@@ -480,7 +481,7 @@ var newClientConnection = func(
 		MaxBidiStreamNum:               protocol.StreamNum(s.config.MaxIncomingStreams),
 		MaxUniStreamNum:                protocol.StreamNum(s.config.MaxIncomingUniStreams),
 		MaxAckDelay:                    ackhandler.MaxAckDelay + protocol.TimerGranularity,
-		MaxUDPPayloadSize:              protocol.MaxPacketBufferSize,
+		MaxUDPPayloadSize:              s.config.maxUDPPayloadSize(),
 		AckDelayExponent:               protocol.AckDelayExponent,
 		// For interoperability with quic-go versions before May 2023, this value must be set to a value
 		// different from protocol.DefaultActiveConnectionIDLimit.
@@ -773,6 +774,25 @@ func (c *Conn) supportsDatagrams() bool {
 	return c.peerParams.MaxDatagramFrameSize > 0
 }
 
+// MaxUDPPayloadLimits reports this connection's packet-size ceiling.
+// local is the configured MaxPacketSize (8192 when unset).
+// peer is the peer's max_udp_payload_size once its transport parameters are
+// applied (on the client, at handshake completion), and 0 before. A peer that
+// omits the parameter reports the largest value the parameter can carry.
+// effective is min(local, peer) once the peer value is known: the Path MTU
+// discovery ceiling. A packet size already above the peer's value (an
+// explicit InitialPacketSize, or the 1280-byte default when the peer
+// advertises less) isn't lowered, so the size in use can exceed effective.
+// It is safe to call from any goroutine at any time.
+func (c *Conn) MaxUDPPayloadLimits() (local, peer, effective int64) {
+	local = int64(c.config.maxUDPPayloadSize())
+	peer = c.peerMaxUDPPayloadSize.Load()
+	if peer <= 0 {
+		return local, 0, local
+	}
+	return local, peer, min(local, peer)
+}
+
 // ConnectionState returns basic details about the QUIC connection.
 func (c *Conn) ConnectionState() ConnectionState {
 	c.connStateMutex.Lock()
@@ -851,8 +871,8 @@ func (c *Conn) ConnectionStats() ConnectionStats {
 		PacketsSent:     c.connStats.PacketsSent.Load(),
 		BytesReceived:   c.connStats.BytesReceived.Load(),
 		PacketsReceived: c.connStats.PacketsReceived.Load(),
-		BytesLost:       uint64(c.connStats.BytesLost.Load()),
-		PacketsLost:     uint64(c.connStats.PacketsLost.Load()),
+		BytesLost:       c.connStats.BytesLost.Load(),
+		PacketsLost:     c.connStats.PacketsLost.Load(),
 	}
 }
 
@@ -934,11 +954,11 @@ func (c *Conn) switchToNewPath(tr *Transport, now monotime.Time) {
 		}
 	}
 
-	initialPacketSize := protocol.ByteCount(cmp.Or(c.config.InitialPacketSize, protocol.MinInitialPacketSize))
+	initialPacketSize := c.config.newPathPacketSize()
 	c.sentPacketHandler.MigratedPath(now, initialPacketSize)
 	c.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(initialPacketSize)))
 	c.mtuDiscoverer.Reset(initialPacketSize, c.maxMTU())
-	c.conn = newSendConn(tr.conn, c.conn.RemoteAddr(), udp.PacketInfo{}, utils.DefaultLogger) // TODO: find a better way
+	c.conn = newSendConn(tr.conn, c.conn.RemoteAddr(), packetInfo{}, utils.DefaultLogger) // TODO: find a better way
 	if !c.config.DisablePathMTUDiscovery && c.conn.capabilities().DF {
 		c.mtuDiscoverer.Start(now)
 	}
@@ -1323,7 +1343,7 @@ func (c *Conn) handleShortHeaderPacket(
 	}
 	c.pathManager.SwitchToPath(p.remoteAddr)
 	c.connIDManager.SwitchToPath(path)
-	initialPacketSize := protocol.ByteCount(cmp.Or(c.config.InitialPacketSize, protocol.MinInitialPacketSize))
+	initialPacketSize := c.config.newPathPacketSize()
 	c.sentPacketHandler.MigratedPath(p.rcvTime, initialPacketSize)
 	c.maxPayloadSizeEstimate.Store(uint32(estimateMaxPayloadSize(initialPacketSize)))
 	c.mtuDiscoverer.Reset(initialPacketSize, c.maxMTU())
@@ -2522,16 +2542,20 @@ func (c *Conn) applyTransportParameters() {
 		// Retire the connection ID.
 		c.connIDManager.AddFromPreferredAddress(params.PreferredAddress.ConnectionID, params.PreferredAddress.StatelessResetToken)
 	}
+	c.peerMaxUDPPayloadSize.Store(int64(params.MaxUDPPayloadSize))
 	if c.mtuDiscoverer != nil {
 		c.mtuDiscoverer = newMTUDiscoverer(c.rttStats, c.mtuDiscoverer.CurrentSize(), c.maxMTU(), c.qlogger)
 	}
 }
 
+// maxMTU is the Path MTU discovery ceiling: the configured MaxPacketSize, lowered
+// to the peer's max_udp_payload_size once that is known.
 func (c *Conn) maxMTU() protocol.ByteCount {
+	local := c.config.maxUDPPayloadSize()
 	if c.peerParams == nil || c.peerParams.MaxUDPPayloadSize <= 0 {
-		return protocol.MaxPacketBufferSize
+		return local
 	}
-	return min(protocol.MaxPacketBufferSize, c.peerParams.MaxUDPPayloadSize)
+	return min(local, c.peerParams.MaxUDPPayloadSize)
 }
 
 func (c *Conn) triggerSending(now monotime.Time) error {
@@ -2647,7 +2671,7 @@ func (c *Conn) sendPackets(now monotime.Time) error {
 
 func (c *Conn) sendPacketsWithoutGSO(now monotime.Time) error {
 	for {
-		buf := udp.GetPacketBuffer()
+		buf := getPacketBuffer()
 		ecn := c.sentPacketHandler.ECNMode(true)
 		if _, err := c.appendOneShortHeaderPacket(buf, c.maxPacketSize(), ecn, now); err != nil {
 			if err == errNothingToPack {
@@ -2679,7 +2703,7 @@ func (c *Conn) sendPacketsWithoutGSO(now monotime.Time) error {
 }
 
 func (c *Conn) sendPacketsWithGSO(now monotime.Time) error {
-	buf := udp.GetLargePacketBuffer()
+	buf := getLargePacketBuffer()
 	maxSize := c.maxPacketSize()
 
 	ecn := c.sentPacketHandler.ECNMode(true)
@@ -2735,7 +2759,7 @@ func (c *Conn) sendPacketsWithGSO(now monotime.Time) error {
 		}
 
 		ecn = nextECN
-		buf = udp.GetLargePacketBuffer()
+		buf = getLargePacketBuffer()
 	}
 }
 
@@ -2815,7 +2839,7 @@ func (c *Conn) sendProbePacket(sendMode ackhandler.SendMode, now monotime.Time) 
 
 // appendOneShortHeaderPacket appends a new packet to the given packetBuffer.
 // If there was nothing to pack, the returned size is 0.
-func (c *Conn) appendOneShortHeaderPacket(buf *udp.PacketBuffer, maxSize protocol.ByteCount, ecn protocol.ECN, now monotime.Time) (protocol.ByteCount, error) {
+func (c *Conn) appendOneShortHeaderPacket(buf *packetBuffer, maxSize protocol.ByteCount, ecn protocol.ECN, now monotime.Time) (protocol.ByteCount, error) {
 	startLen := buf.Len()
 	p, err := c.packer.AppendPacket(buf, maxSize, now, c.version)
 	if err != nil {
@@ -2929,7 +2953,7 @@ func (c *Conn) sendPackedCoalescedPacket(packet *coalescedPacket, ecn protocol.E
 	err := c.conn.Write(packet.buffer.Data, 0, ecn)
 	packet.buffer.Release()
 	if err != nil {
-		if !udp.IsSendMsgSizeErr(err) || c.config.InitialPacketSize != 0 {
+		if !isSendMsgSizeErr(err) || c.config.InitialPacketSize != 0 {
 			return err
 		}
 	}

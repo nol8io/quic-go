@@ -1,7 +1,6 @@
 package quic
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -16,10 +15,10 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/ackhandler"
-	"github.com/quic-go/quic-go/internal/monotime"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/wire"
+	"github.com/nol8io/quic-go/internal/ackhandler"
+	"github.com/nol8io/quic-go/internal/monotime"
+	"github.com/nol8io/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/internal/wire"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -533,7 +532,9 @@ func TestSendStreamLargeWrites(t *testing.T) {
 		str := newSendStream(context.Background(), streamID, mockSender, mockFC, false)
 
 		mockSender.EXPECT().onHasStreamData(streamID, str)
-		data := make([]byte, 5000)
+		// Larger than the stream buffer. The 40-byte pops below must leave a final
+		// frame strictly smaller than the mocked send window (MaxPacketBufferSize).
+		data := make([]byte, protocol.MaxPacketBufferSize+60)
 		rand.Read(data)
 		errChan := make(chan error, 1)
 		go func() {
@@ -701,7 +702,7 @@ func TestSendStreamDeadlineRemoval(t *testing.T) {
 		// large writes might block, and therefore subject to the deadline
 		errChan := make(chan error, 1)
 		go func() {
-			_, err := (&writerWithTimeout{Writer: str, Timeout: 5 * time.Second}).Write(make([]byte, 2000))
+			_, err := (&writerWithTimeout{Writer: str, Timeout: 5 * time.Second}).Write(make([]byte, protocol.MaxPacketBufferSize+1))
 			errChan <- err
 		}()
 
@@ -753,7 +754,7 @@ func TestSendStreamDeadlineExtension(t *testing.T) {
 		mockSender.EXPECT().onHasStreamData(gomock.Any(), str)
 		errChan := make(chan error, 1)
 		go func() {
-			_, err := str.Write(make([]byte, 2000))
+			_, err := str.Write(make([]byte, protocol.MaxPacketBufferSize+1))
 			errChan <- err
 		}()
 
@@ -902,7 +903,7 @@ func TestSendStreamCloseForShutdown(t *testing.T) {
 		mockSender.EXPECT().onHasStreamData(streamID, str)
 		errChan := make(chan error, 1)
 		go func() {
-			_, err := strWithTimeout.Write(bytes.Repeat([]byte("foobar"), 1000))
+			_, err := strWithTimeout.Write(make([]byte, protocol.MaxPacketBufferSize+1))
 			errChan <- err
 		}()
 
@@ -994,8 +995,7 @@ func TestSendStreamCancellation(t *testing.T) {
 		mockSender.EXPECT().onHasStreamData(streamID, str).Do(func(protocol.StreamID, *SendStream) { close(wrote) })
 		errChan := make(chan error, 1)
 		go func() {
-			// fits into a packet buffer once the cancellation drops the queued "bar"
-			_, err := strWithTimeout.Write(make([]byte, protocol.MaxPacketBufferSize))
+			_, err := strWithTimeout.Write(make([]byte, protocol.MaxPacketBufferSize+1))
 			errChan <- err
 		}()
 
@@ -1253,17 +1253,15 @@ func TestSendStreamStopSendingDuringWrite(t *testing.T) {
 		mockSender.EXPECT().onHasStreamData(streamID, str).MaxTimes(2)
 		_, err := (&writerWithTimeout{Writer: str, Timeout: time.Second}).Write([]byte("foobar"))
 		require.NoError(t, err)
-		frame, _, _ := str.popStreamFrame(3+expectedFrameHeaderLen(streamID, 0), protocol.Version1)
+		frame, _, _ := str.popStreamFrame(protocol.MaxByteCount, protocol.Version1)
 		require.NotNil(t, frame.Frame)
 		require.True(t, mockCtrl.Satisfied())
 
 		errChan := make(chan error, 1)
 		go func() {
-			// fits into a packet buffer once the cancellation drops the queued "bar"
-			_, err := str.Write(make([]byte, protocol.MaxPacketBufferSize))
+			_, err := str.Write(make([]byte, protocol.MaxPacketBufferSize+1))
 			errChan <- err
 		}()
-		synctest.Wait()
 
 		mockSender.EXPECT().onHasStreamControlFrame(streamID, str)
 		str.handleStopSendingFrame(&wire.StopSendingFrame{StreamID: streamID, ErrorCode: 1337})
@@ -1279,7 +1277,7 @@ func TestSendStreamStopSendingDuringWrite(t *testing.T) {
 
 		cf, ok, hasMore := str.getControlFrame(monotime.Now())
 		require.True(t, ok)
-		require.Equal(t, &wire.ResetStreamFrame{StreamID: streamID, FinalSize: 3, ErrorCode: 1337}, cf.Frame)
+		require.Equal(t, &wire.ResetStreamFrame{StreamID: streamID, FinalSize: 6, ErrorCode: 1337}, cf.Frame)
 		require.False(t, hasMore)
 
 		// receiving another STOP_SENDING frame has no effect

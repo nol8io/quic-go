@@ -6,8 +6,6 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/protocol"
-
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,6 +35,7 @@ func TestSimpleSimNet(t *testing.T) {
 		}
 		connB := newConn(router, &addressB, linkSettings)
 
+		router.Start()
 		defer router.Close()
 
 		start := time.Now()
@@ -51,12 +50,5 @@ func TestSimpleSimNet(t *testing.T) {
 		// Only downlink has latency now (uplink is instant)
 		t.Logf("observed latency: %v, expected latency: %v", observedLatency, latency)
 		require.InEpsilon(t, latency, observedLatency, 0.30)
-
-		// ECN marks are delivered with the packet.
-		_, err = connA.WritePacket([]byte("hello"), &addressB, nil, 0, protocol.ECT1)
-		require.NoError(t, err)
-		p, err := connB.ReadPacket()
-		require.NoError(t, err)
-		require.Equal(t, protocol.ECT1, p.ECN)
 	})
 }

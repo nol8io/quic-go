@@ -3,7 +3,7 @@ package wire
 import (
 	"testing"
 
-	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/internal/protocol"
 
 	"github.com/stretchr/testify/require"
 )

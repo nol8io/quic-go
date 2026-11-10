@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nol8io/quic-go/http3/qlog"
 	"github.com/quic-go/qpack"
-	"github.com/quic-go/quic-go/http3/qlog"
 
 	"golang.org/x/net/http/httpguts"
 )
@@ -45,7 +45,7 @@ type responseWriter struct {
 	// and automatically add the Content-Length header
 	smallResponseBuf []byte
 
-	contentLen     int64 // if handler set valid Content-Length header, -1 otherwise
+	contentLen     int64 // if handler set valid Content-Length header
 	numWritten     int64 // bytes written
 	headerComplete bool  // set once WriteHeader is called with a status code >= 200
 	headerWritten  bool  // set once the response header has been serialized to the stream
@@ -73,12 +73,11 @@ var (
 
 func newResponseWriter(str *Stream, conn *rawConn, isHead bool, logger *slog.Logger) *responseWriter {
 	return &responseWriter{
-		str:        str,
-		conn:       conn,
-		header:     http.Header{},
-		contentLen: -1,
-		isHead:     isHead,
-		logger:     logger,
+		str:    str,
+		conn:   conn,
+		header: http.Header{},
+		isHead: isHead,
+		logger: logger,
 	}
 }
 
@@ -161,7 +160,7 @@ func (w *responseWriter) Write(p []byte) (int, error) {
 		return 0, http.ErrBodyNotAllowed
 	}
 
-	if w.contentLen != -1 && w.numWritten+int64(len(p)) > w.contentLen {
+	if w.contentLen != 0 && w.numWritten+int64(len(p)) > w.contentLen {
 		return 0, http.ErrContentLength
 	}
 

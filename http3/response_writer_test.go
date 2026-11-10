@@ -9,9 +9,9 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3/qlog"
-	"github.com/quic-go/quic-go/testutils/events"
+	"github.com/nol8io/quic-go"
+	"github.com/nol8io/quic-go/http3/qlog"
+	"github.com/nol8io/quic-go/testutils/events"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -308,20 +308,6 @@ func TestResponseWriterContentLength(t *testing.T) {
 	require.Equal(t, []string{"200"}, fields[":status"])
 	require.Equal(t, []string{"6"}, fields["content-length"])
 	require.Equal(t, []byte("foobar"), rw.DecodeBody(t))
-}
-
-func TestResponseWriterContentLengthZero(t *testing.T) {
-	rw := newTestResponseWriter(t)
-	rw.Header().Set("Content-Length", "0")
-	n, err := rw.Write([]byte("foobar"))
-	require.Zero(t, n)
-	require.ErrorIs(t, err, http.ErrContentLength)
-	require.NoError(t, rw.Finish())
-
-	fields := rw.DecodeHeaders(t, 0)
-	require.Equal(t, []string{"200"}, fields[":status"])
-	require.Equal(t, []string{"0"}, fields["content-length"])
-	require.Empty(t, rw.DecodeBody(t))
 }
 
 func TestResponseWriterContentLengthRetry(t *testing.T) {

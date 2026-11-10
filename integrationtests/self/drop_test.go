@@ -9,10 +9,10 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/wire"
-	"github.com/quic-go/quic-go/testutils/simnet"
+	"github.com/nol8io/quic-go"
+	"github.com/nol8io/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/internal/wire"
+	"github.com/nol8io/quic-go/testutils/simnet"
 
 	"github.com/stretchr/testify/require"
 )
@@ -69,6 +69,7 @@ func testPacketDrops(t *testing.T, direction protocol.Perspective) {
 		serverPacketConn := n.NewEndpoint(addrServer, settings)
 		defer serverPacketConn.Close()
 
+		require.NoError(t, n.Start())
 		defer n.Close()
 
 		t.Logf("sending a message every %s, %d times", messageInterval, numMessages)

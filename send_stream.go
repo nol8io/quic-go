@@ -7,10 +7,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/quic-go/quic-go/internal/ackhandler"
-	"github.com/quic-go/quic-go/internal/monotime"
-	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/wire"
+	"github.com/nol8io/quic-go/internal/ackhandler"
+	"github.com/nol8io/quic-go/internal/monotime"
+	"github.com/nol8io/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/internal/wire"
 )
 
 const defaultUrgency = 3
@@ -253,7 +253,7 @@ func (s *SendStream) write(p []byte, limiter func(int) int) (bool /* is newly co
 		notifiedSender bool
 	)
 	for {
-		if s.writeLimited || s.resetErr != nil || s.shutdownErr != nil {
+		if s.writeLimited {
 			bytesWritten = len(p) - len(s.dataForWriting)
 			s.dataForWriting = nil
 			break
@@ -297,7 +297,7 @@ func (s *SendStream) write(p []byte, limiter func(int) int) (bool /* is newly co
 					deadlineTimer.Reset(monotime.Until(deadline))
 				}
 			}
-			if s.dataForWriting == nil {
+			if s.dataForWriting == nil || s.shutdownErr != nil || s.resetErr != nil {
 				break
 			}
 		}
