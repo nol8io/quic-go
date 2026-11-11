@@ -77,10 +77,17 @@ the nol8 commits. Each later sync is one commit on `master`, so upstream's commi
 v0.65.0 reach `master`'s content but not its history. Only `nol8/UPSTREAM` says which
 upstream release `master` contains.
 
-Upstream's workflows are unchanged apart from the module path. Three of them need
-upstream's own infrastructure, so they are disabled in this repository's Actions settings: "ClusterFuzzLite PR fuzzing",
-"Benchmarks" (CodSpeed) and "Build interop Docker image". GitHub disables scheduled
-workflows in a fork by default, so upstream's scheduled ones don't run here either.
+Upstream's workflows are unchanged apart from the module path, and they run here too,
+including the scheduled ones such as the daily `govulncheck` scan. Six of them need
+upstream's own infrastructure, so they are disabled in this repository's Actions settings:
+
+- the four ClusterFuzz workflows, "ClusterFuzzLite PR fuzzing", "ClusterFuzzLite batch
+  fuzzing", "ClusterFuzzLite pruning" and "ClusterFuzz coverage", which use upstream's
+  fuzzing storage and credentials;
+- "Benchmarks", which runs on CodSpeed's runner;
+- "Build interop Docker image", which pushes to upstream's Docker Hub account.
+
+A sync can bring a new upstream workflow of that kind; disable it the same way.
 
 ## Versions
 
@@ -120,13 +127,19 @@ does, or upstream publishes a newer release, the job fails again every month.
 - The job only syncs to upstream's newest release. To sync to another one, such as a
   patch release of an older line, run `nol8/sync.sh vX.Y.Z` by hand.
 
-The job pushes and opens the pull request with a fine-grained personal access token, kept
-in the repository secret `NOL8_SYNC_TOKEN`; a pull request opened with the workflow's own
-token wouldn't run CI. A member of the SDK team owns the token. It is limited to this
-repository, with read and write access to contents, pull requests and workflows, because a
-sync also brings upstream's changes to its workflow files. The job fails while the token
-is missing or expired, so replace it before it expires. The job's pull requests are
-opened as the token's owner, so someone else approves them.
+The job pushes and opens the pull request with a personal access token, kept in the
+repository secret `NOL8_SYNC_TOKEN`; a pull request opened with the workflow's own token
+wouldn't run CI. A member of the SDK team owns the token. It needs to push branches that
+change workflow files, because a sync also brings upstream's changes to them, and to open
+pull requests:
+
+- a fine-grained token, limited to this repository, with read and write access to
+  contents, pull requests and workflows; or
+- a classic token with the `public_repo` and `workflow` scopes, which reaches every public
+  repository its owner can push to.
+
+The job fails while the token is missing or expired, so replace it before it expires. The
+job's pull requests are opened as the token's owner, so someone else approves them.
 
 By hand, work in a clone of this repository that holds no upstream tags: `git tag -l`
 lists only this fork's tags. Never fetch upstream with its tags, and push branches with
