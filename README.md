@@ -172,12 +172,13 @@ lists only this fork's tags. Never fetch upstream with its tags, and push branch
 
 ## Ownership and security
 
-- **Owner:** the nol8 Data Path SDK team. It moves the fork to each upstream release the
-  SDK adopts.
+- **Owner:** Pavlo Belevtsev ([pavlo-nol8](https://github.com/pavlo-nol8)), for the nol8
+  Data Path SDK team. The owner moves the fork to each upstream release the SDK adopts. A
+  new owner replaces this line.
 - **Upstream security fixes:** applied within 7 days of their release, by syncing to the
   upstream release that contains the fix (run the "nol8 upstream" workflow on demand, or
   `nol8/sync.sh`), or as the next `-nol8.N` of the current release.
-- **Advisory watch:** the owners watch upstream's releases and
+- **Advisory watch:** the owner watches upstream's releases and
   [security advisories](https://github.com/quic-go/quic-go/security/advisories); a monthly
   check alone can't meet the 7 days. `govulncheck` matches advisories by module path, so a
   scan of this fork never reports upstream quic-go's own advisories. The "Upstream
@@ -190,10 +191,10 @@ lists only this fork's tags. Never fetch upstream with its tags, and push branch
   - `govulncheck ./...` covers this fork's dependencies and the standard library.
 
   When a scheduled run fails, GitHub notifies whoever last changed the workflow's schedule
-  or last enabled the workflow, so that should be a member of the SDK team. GitHub can
+  or last enabled the workflow, so that should be the owner. GitHub can
   disable scheduled workflows in a fork, and does in a public repository after 60 days
-  without activity. The owners check with `gh workflow list` that "nol8 upstream" is
-  active, and enable it with `gh workflow enable nol8-upstream.yml`.
+  without activity. The owner checks with `gh workflow list` that "nol8 upstream" is
+  active, and enables it with `gh workflow enable nol8-upstream.yml`.
 - **Reporting:** report an issue in the fork's own change to the Data Path SDK team.
   Report anything else to upstream, as described in [SECURITY.md](SECURITY.md).
 
