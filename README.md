@@ -14,7 +14,8 @@ it, so the change ships as a fork with its own module path.
 
 ## What differs from upstream
 
-Release branch `nol8/vX.Y.Z` is upstream tag `vX.Y.Z` plus exactly these changes.
+Branch `master` is the upstream release named in [`nol8/UPSTREAM`](nol8/UPSTREAM) plus exactly
+these changes.
 
 1. **Packet size.** This is Argus's change (Argus `e9d6c34`), ported to the upstream
    version.
@@ -46,33 +47,140 @@ Release branch `nol8/vX.Y.Z` is upstream tag `vX.Y.Z` plus exactly these changes
    - Upstream tests whose inputs assumed the 1452-byte ceiling now size those inputs from
      `MaxPacketBufferSize`, with every assertion kept: `send_stream_test.go`,
      `integrationtests/self/zero_rtt_test.go` and `integrationtests/self/datagram_test.go`.
+   - `integrationtests/self/mtu_test.go` caps its client at upstream's 1452 bytes. From 8192,
+     Path MTU discovery doesn't get within 25 bytes of the test path's MTU during that test's
+     transfer.
    - `config_test.go` gives the new field a value in its every-field-set helper.
 2. **Module path.** Upstream's `github.com/quic-go/quic-go` becomes
    `github.com/nol8io/quic-go`. It changes in every `go.mod` file and Go import, in the
    generated mocks, and in the package paths in CI and build scripts. Links to upstream
    issues, pull requests and documentation still point upstream.
 3. This section of the README.
+4. **Fork maintenance.** `nol8/UPSTREAM` names the upstream release that `master` holds.
+   The scripts `nol8/sync.sh`, `nol8/sync-pr.sh` and `nol8/advisories.sh` move the fork to
+   a new upstream release and check upstream's security advisories. The workflow
+   `.github/workflows/nol8-upstream.yml` runs them (see
+   [Updating to a new upstream release](#updating-to-a-new-upstream-release) and
+   [Ownership and security](#ownership-and-security)). None of them is part of the library.
 
-Nothing else changes. To see the full delta, compare a release branch with its upstream
-tag.
+Nothing else changes. To see the full delta, fetch the upstream release named in
+`nol8/UPSTREAM`, without upstream's other tags, and compare it with `master`. Most of the
+delta is the module path.
+
+```
+git fetch --no-tags https://github.com/quic-go/quic-go.git refs/tags/vX.Y.Z:refs/upstream/vX.Y.Z
+git diff refs/upstream/vX.Y.Z master
+```
+
+Compare content, not history. `master`'s history is upstream's up to v0.65.0, followed by
+the nol8 commits. Each later sync is one commit on `master`, so upstream's commits after
+v0.65.0 reach `master`'s content but not its history. Only `nol8/UPSTREAM` says which
+upstream release `master` contains.
+
+Upstream's workflows are unchanged apart from the module path. Three of them need
+upstream's own infrastructure, so they are disabled in this repository's Actions settings: "ClusterFuzzLite PR fuzzing",
+"Benchmarks" (CodSpeed) and "Build interop Docker image". GitHub disables scheduled
+workflows in a fork by default, so upstream's scheduled ones don't run here either.
 
 ## Versions
 
-Tags are `vX.Y.Z-nol8.N`: upstream `vX.Y.Z` with nol8 revision `N`. This repository keeps
-no upstream tags. Go orders `vX.Y.Z-nol8.N` before `vX.Y.Z`, so depend on an exact fork
-version:
+Tags are `vX.Y.Z-nol8.N`: upstream release `vX.Y.Z` with fork release `N` on it. This
+repository keeps none of upstream's tags, so only `-nol8.N` tags exist. Go orders
+`vX.Y.Z-nol8.N` before `vX.Y.Z`, so depend on an exact fork version, for example:
 
 ```
-go get github.com/nol8io/quic-go@v0.65.0-nol8.1
+go get github.com/nol8io/quic-go@v0.65.0-nol8.2
 ```
+
+Releases are tagged on `master`. A sync to upstream `vX.Y.Z` is released as
+`vX.Y.Z-nol8.1`, and each later fix of the fork's own on that release as the next `N`. Each
+tag's message says what changed. A fix that an older release needs goes on a branch
+`nol8/vX.Y.Z` made from that release's last tag, and is tagged there.
+
+`v0.65.0-nol8.1` was the first release, made before `master` became the trunk;
+`v0.65.0-nol8.2` has the same library code. The Go module proxy keeps every version it
+has served, so a version name is never used again, even if its tag is removed.
+
+## Updating to a new upstream release
+
+The "Upstream sync" job in `.github/workflows/nol8-upstream.yml` runs on the first day of
+each month, and on demand from the Actions tab (run the "nol8 upstream" workflow on
+`master`). When upstream has a release newer than `nol8/UPSTREAM` and this repository has
+no branch `sync/vX.Y.Z`, it runs `nol8/sync-pr.sh`. That builds the branch with
+`nol8/sync.sh` (step 1 below), pushes it and opens a pull request into `master`; review it
+from step 3 on. If the nol8 changes conflict with the release, the job opens nothing,
+fails, and names the files in its summary; then follow all the steps below. Until someone
+does, or upstream publishes a newer release, the job fails again every month.
+
+- To skip a release, close its pull request and keep the branch. A branch `sync/vX.Y.Z`
+  without any pull request fails the job, so that a branch left over from a failed run
+  can't stop the syncs: open a pull request from it, or delete it.
+- When upstream publishes a newer release while a sync's pull request is still open, the
+  job opens another; close the older one.
+- The job only syncs to upstream's newest release. To sync to another one, such as a
+  patch release of an older line, run `nol8/sync.sh vX.Y.Z` by hand.
+
+The job pushes and opens the pull request with a fine-grained personal access token, kept
+in the repository secret `NOL8_SYNC_TOKEN`; a pull request opened with the workflow's own
+token wouldn't run CI. A member of the SDK team owns the token. It is limited to this
+repository, with read and write access to contents, pull requests and workflows, because a
+sync also brings upstream's changes to its workflow files. The job fails while the token
+is missing or expired, so replace it before it expires. The job's pull requests are
+opened as the token's owner, so someone else approves them.
+
+By hand, work in a clone of this repository that holds no upstream tags: `git tag -l`
+lists only this fork's tags. Never fetch upstream with its tags, and push branches with
+`--no-follow-tags`, so that no upstream tag can reach this repository.
+
+1. From a clean, up-to-date checkout of `master`, run `nol8/sync.sh vX.Y.Z`. It fetches
+   the two upstream releases it needs, without tags, and creates the local branch
+   `sync/vX.Y.Z`: upstream `vX.Y.Z` with the module rename, plus the nol8 changes, as one
+   commit on top of `master`. It merges the nol8 changes in and follows files that upstream
+   renamed.
+2. If the nol8 changes conflict with the new release, including in a file that upstream
+   deleted or a directory it renamed, the script stops and names the files. Resolve them
+   in the worktree it prints, stage the result with `git add` or `git rm`, and run
+   `nol8/sync.sh --finish <worktree>`. To give up instead, run the command it prints for
+   that.
+3. If the script lists files that still name `github.com/quic-go/quic-go` outside a URL,
+   check each one. Fix any that need the new path on the branch in step 4; later syncs
+   carry the fix as one of the nol8 changes. If a kind of file will keep needing it, add
+   it to `rename_module` in `nol8/sync.sh` through a separate pull request into `master`.
+4. On the branch, fix anything upstream's changes broke in the nol8 changes, and keep the
+   list of changes above true to the branch. Then run `go build ./...`, `go vet ./...` and
+   `go test -race ./...` in the root module, and `go vet ./...` in
+   `integrationtests/fips` and `integrationtests/gomodvendor`. Commit the fixes to the
+   branch.
+5. Push the branch with `git push --no-follow-tags origin sync/vX.Y.Z` and open a pull
+   request into `master`. After review, squash-merge it.
+6. Tag the merge commit with an annotated tag `vX.Y.Z-nol8.1`, naming the upstream release
+   in its message, and push only that tag, for example
+   `git push --no-follow-tags origin v0.66.0-nol8.1`, never `--tags`.
 
 ## Ownership and security
 
-- **Owner:** the nol8 Data Path SDK team.
-- **Upstream security fixes:** applied within 7 days, released as a new `-nol8.N` tag or a
-  new release branch.
-- **Advisory watch:** `govulncheck` doesn't map upstream advisories to this module path.
-  The owners therefore watch upstream security advisories and releases instead.
+- **Owner:** the nol8 Data Path SDK team. It moves the fork to each upstream release the
+  SDK adopts.
+- **Upstream security fixes:** applied within 7 days of their release, by syncing to the
+  upstream release that contains the fix (run the "nol8 upstream" workflow on demand, or
+  `nol8/sync.sh`), or as the next `-nol8.N` of the current release.
+- **Advisory watch:** the owners watch upstream's releases and
+  [security advisories](https://github.com/quic-go/quic-go/security/advisories); a monthly
+  check alone can't meet the 7 days. `govulncheck` matches advisories by module path, so a
+  scan of this fork never reports upstream quic-go's own advisories. The "Upstream
+  advisories" job in `.github/workflows/nol8-upstream.yml` therefore runs two checks, every
+  month, on every pull request and on demand:
+  - `nol8/advisories.sh` checks the upstream release in `nol8/UPSTREAM` against the Go
+    vulnerability database, and fails on any upstream quic-go advisory that affects it. A
+    sync's pull request therefore checks the release it moves to. Run
+    `nol8/advisories.sh vX.Y.Z` to check a release before syncing to it.
+  - `govulncheck ./...` covers this fork's dependencies and the standard library.
+
+  When a scheduled run fails, GitHub notifies whoever last changed the workflow's schedule
+  or last enabled the workflow, so that should be a member of the SDK team. GitHub can
+  disable scheduled workflows in a fork, and does in a public repository after 60 days
+  without activity. The owners check with `gh workflow list` that "nol8 upstream" is
+  active, and enable it with `gh workflow enable nol8-upstream.yml`.
 - **Reporting:** report an issue in the fork's own change to the Data Path SDK team.
   Report anything else to upstream, as described in [SECURITY.md](SECURITY.md).
 
