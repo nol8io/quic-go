@@ -81,12 +81,20 @@ these changes.
    - The `qlog` and `qlogwriter` packages still read `QLOGDIR` and report their own errors
      with the `log` package, as upstream. Only an application that sets a qlog tracer
      reaches that code; the SDK doesn't.
+   - The `http3` package still logs through `slog.Default()` when its `Server` has no
+     `Logger`, as upstream: `http3/server.go:438` (a listener whose port can't be read),
+     `http3/server_conn.go:239` (a handler panic) and `http3/response_writer.go:129` (a
+     malformed `Content-Length`). The default handler writes to stderr. Only an
+     application that runs an HTTP/3 server without a logger reaches that code; neither
+     the SDK nor Argus imports `http3`.
    - A new upstream release can add a variable or a write. Outside tests, `example/`,
-     `interop/` and `integrationtests/`, this must list only `internal/utils/log.go` (the
-     logger that stays off) and the two qlog packages:
+     `interop/` and `integrationtests/`, this must print only the `log` import in
+     `internal/utils/log.go` (the logger that stays off), the `log` imports and the
+     `QLOGDIR` read in the two qlog packages, and `http3`'s `log/slog` imports and its three
+     `slog.Default()` fallbacks:
 
      ```
-     git grep -nE 'os\.(Getenv|LookupEnv|Environ|Stderr|Stdout)|syscall\.Getenv|"log"$' -- '*.go' ':!*_test.go' ':!example/' ':!interop/' ':!integrationtests/'
+     git grep -nE 'os\.(Getenv|LookupEnv|Environ|Stderr|Stdout)|syscall\.Getenv|"log(/slog)?"$|slog\.(Default|Debug|Info|Warn|Error|Log)(Context|Attrs)?\(' -- '*.go' ':!*_test.go' ':!example/' ':!interop/' ':!integrationtests/'
      ```
 3. **Module path.** Upstream's `github.com/quic-go/quic-go` becomes
    `github.com/nol8io/quic-go`. It changes in every `go.mod` file and Go import, in the
