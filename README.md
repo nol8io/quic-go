@@ -6,11 +6,18 @@ this section is upstream's README, unchanged.
 
 ## Why it exists
 
-Upstream caps every QUIC packet at 1452 bytes of UDP payload
-(`internal/protocol.MaxPacketBufferSize`), and no setting changes that. Iris links run on
-networks with larger MTUs, so this fork lets Path MTU discovery grow packets up to
-8192 bytes. A Go library can't impose a `replace` directive on the applications that use
-it, so the change ships as a fork with its own module path.
+The fork exists for two changes that upstream doesn't have (changes 1 and 2 below):
+
+- **Packet size.** Upstream caps every QUIC packet at 1452 bytes of UDP payload
+  (`internal/protocol.MaxPacketBufferSize`), and no setting changes that. Iris links run on
+  networks with larger MTUs, so this fork lets Path MTU discovery grow packets up to
+  8192 bytes.
+- **No output, no `QUIC_GO_*` variables.** Upstream can write to stderr and reads
+  `QUIC_GO_*` environment variables. The SDK writes nothing outside its client's logger,
+  and the process environment doesn't change what it does, so this fork removes both.
+
+A Go library can't impose a `replace` directive on the applications that use it, so the
+changes ship as a fork with its own module path.
 
 ## What differs from upstream
 
@@ -231,9 +238,14 @@ lists only this fork's tags. Never fetch upstream with its tags, and push branch
 
 ## End of life
 
-nol8 is proposing upstream that the maximum packet size become a configuration option.
-Once upstream supports it, the SDK and Argus move back to upstream quic-go and this
-repository is archived.
+The fork stays until upstream covers both of its changes:
+
+- the maximum packet size is a configuration option (change 1); and
+- upstream writes nothing to stderr and reads no `QUIC_GO_*` variable, or offers a way to
+  turn both off (change 2).
+
+Then the SDK and Argus move back to upstream quic-go and this repository is archived. nol8
+is proposing upstream that the maximum packet size become a configuration option.
 
 ---
 
