@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/netip"
 	"os"
-	"strconv"
 	"syscall"
 	"unsafe"
 
@@ -64,11 +63,8 @@ func parseIPv4PktInfo(body []byte) (ip netip.Addr, ifIndex uint32, ok bool) {
 // isGSOEnabled tests if the kernel supports GSO.
 // Sending with GSO might still fail later on, if the interface doesn't support it (see isGSOError).
 func isGSOEnabled(conn syscall.RawConn) bool {
+	// nol8 (D106): QUIC_GO_DISABLE_GSO is not read.
 	if kernelVersionMajor < 5 {
-		return false
-	}
-	disabled, err := strconv.ParseBool(os.Getenv("QUIC_GO_DISABLE_GSO"))
-	if err == nil && disabled {
 		return false
 	}
 	var serr error
@@ -117,7 +113,7 @@ func isPermissionError(err error) bool {
 }
 
 func isECNEnabled() bool {
-	return kernelVersionMajor >= 5 && !isECNDisabledUsingEnv()
+	return kernelVersionMajor >= 5 // nol8 (D106): QUIC_GO_DISABLE_ECN is not read
 }
 
 // kernelVersion returns major and minor kernel version numbers, parsed from

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log"
 	"os"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -122,25 +123,20 @@ func TestLogAddPrefixes(t *testing.T) {
 	require.Contains(t, b.String(), "debug2")
 }
 
-func TestLogLevelFromEnv(t *testing.T) {
-	testCases := []struct {
-		envValue string
-		expected LogLevel
-	}{
-		{"DEBUG", LogLevelDebug},
-		{"debug", LogLevelDebug},
-		{"INFO", LogLevelInfo},
-		{"ERROR", LogLevelError},
+// nol8 (D106): QUIC_GO_LOG_LEVEL doesn't set the level, and an invalid value
+// writes nothing. The level is set in init, so each value is checked in a
+// child process that starts with the variable set.
+func TestLogLevelNotFromEnv(t *testing.T) {
+	const env = "QUIC_GO_LOG_LEVEL"
+	if value, ok := os.LookupEnv(env); ok {
+		require.Equal(t, LogLevelNothing, DefaultLogger.(*defaultLogger).logLevel, "%s=%s", env, value)
+		return
 	}
-
-	for _, tc := range testCases {
-		t.Setenv(logEnv, tc.envValue)
-		require.Equal(t, tc.expected, readLoggingEnv())
+	for _, value := range []string{"DEBUG", "debug", "INFO", "ERROR", "asdf"} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestLogLevelNotFromEnv$")
+		cmd.Env = append(os.Environ(), env+"="+value)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "%s=%s: %s", env, value, out)
+		require.NotContains(t, string(out), "log level", "%s=%s", env, value)
 	}
-
-	// invalid values
-	t.Setenv(logEnv, "")
-	require.Equal(t, LogLevelNothing, readLoggingEnv())
-	t.Setenv(logEnv, "asdf")
-	require.Equal(t, LogLevelNothing, readLoggingEnv())
 }

@@ -4,16 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"slices"
-	"strconv"
 
 	"github.com/nol8io/quic-go/internal/protocol"
 	"github.com/nol8io/quic-go/internal/qerr"
 	"github.com/nol8io/quic-go/internal/wire"
 )
-
-const disableClientHelloScramblingEnv = "QUIC_GO_DISABLE_CLIENTHELLO_SCRAMBLING"
 
 // The baseCryptoStream is used by the cryptoStream and the initialCryptoStream.
 // This allows us to implement different logic for PopCryptoFrame for the two streams.
@@ -112,14 +108,11 @@ type initialCryptoStream struct {
 }
 
 func newInitialCryptoStream(isClient bool) *initialCryptoStream {
-	var scramble bool
-	if isClient {
-		disabled, err := strconv.ParseBool(os.Getenv(disableClientHelloScramblingEnv))
-		scramble = err != nil || !disabled
-	}
+	// nol8 (D106): a client always scrambles its ClientHello;
+	// QUIC_GO_DISABLE_CLIENTHELLO_SCRAMBLING is not read.
 	s := &initialCryptoStream{
 		baseCryptoStream: baseCryptoStream{queue: *newFrameSorter()},
-		scramble:         scramble,
+		scramble:         isClient,
 	}
 	for i := range len(s.cuts) {
 		s.cuts[i].start = protocol.InvalidByteCount

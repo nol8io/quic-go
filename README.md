@@ -51,12 +51,42 @@ these changes.
      Path MTU discovery doesn't get within 25 bytes of the test path's MTU during that test's
      transfer.
    - `config_test.go` gives the new field a value in its every-field-set helper.
-2. **Module path.** Upstream's `github.com/quic-go/quic-go` becomes
+2. **No output, no `QUIC_GO_*` variables.** This is decision D106 of the Data Path SDK
+   requirements: the SDK writes nothing outside its client's logger, and the process
+   environment doesn't change what it does. So the library:
+   - logs nothing. Its internal logger stays at level "nothing" and `QUIC_GO_LOG_LEVEL` isn't
+     read, so an invalid value no longer prints a line to stderr at `init`;
+   - doesn't warn when it can't set a UDP socket's buffer sizes, and doesn't read
+     `QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING`;
+   - skips an invalid packet-info control message without a warning;
+   - ignores `QUIC_GO_DISABLE_ECN`, `QUIC_GO_DISABLE_GSO` and
+     `QUIC_GO_DISABLE_CLIENTHELLO_SCRAMBLING`: ECN and GSO are used wherever the system
+     supports them, and a client always scrambles its ClientHello.
+
+   Each changed site in the library has a `nol8 (D106)` comment.
+   - `internal/utils/log_test.go` checks, in a child process, that `QUIC_GO_LOG_LEVEL`
+     changes nothing. `crypto_stream_test.go` and `packet_packer_test.go` no longer read the
+     scrambling variable; the probe-packet test that needs an unscrambled ClientHello turns
+     scrambling off on its stream.
+   - Some upstream tests and CI steps still set these variables, which now do nothing. The
+     integration workflow's "with GSO disabled" and "with ECN disabled" steps repeat the
+     default run, and `integrationtests/self/mtu_fallback_test.go` runs with GSO on Linux.
+   - The `qlog` and `qlogwriter` packages still read `QLOGDIR` and report their own errors
+     with the `log` package, as upstream. Only an application that sets a qlog tracer
+     reaches that code; the SDK doesn't.
+   - A new upstream release can add a variable or a write. Outside tests, `example/`,
+     `interop/` and `integrationtests/`, this must list only `internal/utils/log.go` (the
+     logger that stays off) and the two qlog packages:
+
+     ```
+     git grep -nE 'os\.(Getenv|LookupEnv|Environ|Stderr|Stdout)|syscall\.Getenv|"log"$' -- '*.go' ':!*_test.go' ':!example/' ':!interop/' ':!integrationtests/'
+     ```
+3. **Module path.** Upstream's `github.com/quic-go/quic-go` becomes
    `github.com/nol8io/quic-go`. It changes in every `go.mod` file and Go import, in the
    generated mocks, and in the package paths in CI and build scripts. Links to upstream
    issues, pull requests and documentation still point upstream.
-3. This section of the README.
-4. **Fork maintenance.** `nol8/UPSTREAM` names the upstream release that `master` holds.
+4. This section of the README.
+5. **Fork maintenance.** `nol8/UPSTREAM` names the upstream release that `master` holds.
    The scripts `nol8/sync.sh`, `nol8/sync-pr.sh` and `nol8/advisories.sh` move the fork to
    a new upstream release and check upstream's security advisories. The workflow
    `.github/workflows/nol8-upstream.yml` runs them (see
@@ -160,7 +190,8 @@ lists only this fork's tags. Never fetch upstream with its tags, and push branch
    carry the fix as one of the nol8 changes. If a kind of file will keep needing it, add
    it to `rename_module` in `nol8/sync.sh` through a separate pull request into `master`.
 4. On the branch, fix anything upstream's changes broke in the nol8 changes, and keep the
-   list of changes above true to the branch. Then run `go build ./...`, `go vet ./...` and
+   list of changes above true to the branch. Run the `git grep` check under change 2, and
+   remove any new environment read or output it finds the same way. Then run `go build ./...`, `go vet ./...` and
    `go test -race ./...` in the root module, and `go vet ./...` in
    `integrationtests/fips` and `integrationtests/gomodvendor`. Commit the fixes to the
    branch.
