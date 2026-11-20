@@ -125,7 +125,8 @@ func TestLogAddPrefixes(t *testing.T) {
 
 // nol8 (D106): QUIC_GO_LOG_LEVEL doesn't set the level, and an invalid value
 // writes nothing. The level is set in init, so each value is checked in a
-// child process that starts with the variable set.
+// child process that starts with the variable set. The child must report this
+// test as passed, so a -test.run pattern that matches no test fails.
 func TestLogLevelNotFromEnv(t *testing.T) {
 	const env = "QUIC_GO_LOG_LEVEL"
 	if value, ok := os.LookupEnv(env); ok {
@@ -133,10 +134,11 @@ func TestLogLevelNotFromEnv(t *testing.T) {
 		return
 	}
 	for _, value := range []string{"DEBUG", "debug", "INFO", "ERROR", "asdf"} {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestLogLevelNotFromEnv$")
+		cmd := exec.Command(os.Args[0], "-test.run=^TestLogLevelNotFromEnv$", "-test.v")
 		cmd.Env = append(os.Environ(), env+"="+value)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "%s=%s: %s", env, value, out)
+		require.Contains(t, string(out), "--- PASS: TestLogLevelNotFromEnv", "%s=%s: %s", env, value, out)
 		require.NotContains(t, string(out), "log level", "%s=%s", env, value)
 	}
 }
