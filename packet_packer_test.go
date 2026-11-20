@@ -163,8 +163,6 @@ func generateLargeACKFrame(t *testing.T, minSize protocol.ByteCount) *wire.AckFr
 }
 
 func TestPackLongHeaders(t *testing.T) {
-	skipIfDisableScramblingEnvSet(t)
-
 	t.Run("with Handshake ACK", func(t *testing.T) {
 		testPackLongHeaders(t, true)
 	})
@@ -1003,7 +1001,6 @@ func TestPackShortHeaderPadToAtLeast4Bytes(t *testing.T) {
 
 func TestPackInitialProbePacket(t *testing.T) {
 	t.Run("client", func(t *testing.T) {
-		t.Setenv(disableClientHelloScramblingEnv, "true")
 		testPackProbePacket(t, protocol.EncryptionInitial, protocol.PerspectiveClient)
 	})
 	t.Run("server", func(t *testing.T) {
@@ -1032,6 +1029,9 @@ func testPackProbePacket(t *testing.T, encLevel protocol.EncryptionLevel, perspe
 		var err error
 		cryptoData, err = getClientHello("")
 		require.NoError(t, err)
+		// The ClientHello is expected in one CRYPTO frame. nol8 (D106): scrambling
+		// is turned off here, not with QUIC_GO_DISABLE_CLIENTHELLO_SCRAMBLING.
+		tp.initialStream.scramble = false
 		tp.packer.initialStream.Write(cryptoData)
 	case protocol.EncryptionHandshake:
 		tp.sealingManager.EXPECT().GetHandshakeSealer().Return(newMockShortHeaderSealer(mockCtrl), nil)

@@ -5,12 +5,8 @@ package quic
 import (
 	"encoding/binary"
 	"errors"
-	"log"
 	"net"
 	"net/netip"
-	"os"
-	"strconv"
-	"sync"
 	"syscall"
 	"unsafe"
 
@@ -35,11 +31,6 @@ var _ ipv4.Message = ipv6.Message{}
 
 type batchConn interface {
 	ReadBatch(ms []ipv4.Message, flags int) (int, error)
-}
-
-func isECNDisabledUsingEnv() bool {
-	disabled, err := strconv.ParseBool(os.Getenv("QUIC_GO_DISABLE_ECN"))
-	return err == nil && disabled
 }
 
 type oobConn struct {
@@ -138,8 +129,6 @@ func newConn(c OOBCapablePacketConn, supportsDF bool) (*oobConn, error) {
 	return oobConn, nil
 }
 
-var invalidCmsgOnceV4, invalidCmsgOnceV6 sync.Once
-
 func (c *oobConn) ReadPacket() (receivedPacket, error) {
 	if len(c.messages) == int(c.readPos) { // all messages read. Read the next batch of messages.
 		c.messages = c.messages[:batchSize]
@@ -187,12 +176,8 @@ func (c *oobConn) ReadPacket() (receivedPacket, error) {
 				if ok {
 					p.info.addr = ip
 					p.info.ifIndex = ifIndex
-				} else {
-					invalidCmsgOnceV4.Do(func() {
-						log.Printf("Received invalid IPv4 packet info control message: %+x. "+
-							"This should never occur, please open a new issue and include details about the architecture.", body)
-					})
 				}
+				// nol8 (D106): an invalid message is skipped with no warning on stderr.
 			}
 		}
 		if hdr.Level == unix.IPPROTO_IPV6 {
@@ -211,12 +196,8 @@ func (c *oobConn) ReadPacket() (receivedPacket, error) {
 				if len(body) == 20 {
 					p.info.addr = netip.AddrFrom16(*(*[16]byte)(body[:16])).Unmap()
 					p.info.ifIndex = binary.NativeEndian.Uint32(body[16:])
-				} else {
-					invalidCmsgOnceV6.Do(func() {
-						log.Printf("Received invalid IPv6 packet info control message: %+x. "+
-							"This should never occur, please open a new issue and include details about the architecture.", body)
-					})
 				}
+				// nol8 (D106): an invalid message is skipped with no warning on stderr.
 			}
 		}
 		data = remainder
