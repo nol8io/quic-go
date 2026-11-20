@@ -14,7 +14,9 @@ The fork exists for two changes that upstream doesn't have (changes 1 and 2 belo
   8192 bytes.
 - **No output, no `QUIC_GO_*` variables.** Upstream can write to stderr and reads
   `QUIC_GO_*` environment variables. The SDK writes nothing outside its client's logger,
-  and the process environment doesn't change what it does, so this fork removes both.
+  and the process environment doesn't change what it does, so this fork removes the
+  writes and reads that decision D106 lists. Change 2 names them, and the output that
+  remains.
 
 A Go library can't impose a `replace` directive on the applications that use it, so the
 changes ship as a fork with its own module path.
@@ -249,8 +251,8 @@ lists only this fork's tags. Never fetch upstream with its tags, and push branch
 The fork stays until upstream covers both of its changes:
 
 - the maximum packet size is a configuration option (change 1); and
-- upstream writes nothing to stderr and reads no `QUIC_GO_*` variable, or offers a way to
-  turn both off (change 2).
+- upstream no longer makes the writes and reads that change 2 removes, or offers a way to
+  turn them off.
 
 Then the SDK and Argus move back to upstream quic-go and this repository is archived. nol8
 is proposing upstream that the maximum packet size become a configuration option.
