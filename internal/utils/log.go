@@ -1,10 +1,7 @@
 package utils
 
 import (
-	"fmt"
 	"log"
-	"os"
-	"strings"
 	"time"
 )
 
@@ -21,8 +18,6 @@ const (
 	// LogLevelDebug enables debug logs (e.g. packet contents)
 	LogLevelDebug
 )
-
-const logEnv = "QUIC_GO_LOG_LEVEL"
 
 // A Logger logs.
 type Logger interface {
@@ -109,23 +104,8 @@ func (l *defaultLogger) Debug() bool {
 	return l.logLevel == LogLevelDebug
 }
 
+// nol8 (D106): the level stays LogLevelNothing, so quic-go logs nothing.
+// QUIC_GO_LOG_LEVEL is not read.
 func init() {
 	DefaultLogger = &defaultLogger{}
-	DefaultLogger.SetLogLevel(readLoggingEnv())
-}
-
-func readLoggingEnv() LogLevel {
-	switch strings.ToLower(os.Getenv(logEnv)) {
-	case "":
-		return LogLevelNothing
-	case "debug":
-		return LogLevelDebug
-	case "info":
-		return LogLevelInfo
-	case "error":
-		return LogLevelError
-	default:
-		fmt.Fprintln(os.Stderr, "invalid quic-go log level, see https://github.com/quic-go/quic-go/wiki/Logging")
-		return LogLevelNothing
-	}
 }
