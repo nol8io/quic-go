@@ -252,6 +252,11 @@ $(git -C "$wt" diff-files --name-status -- . ':(exclude)nol8/UPSTREAM')" ;;
 	rm -f "$wt/nol8/UPSTREAM"
 	printf '%s\n' "$target" >"$wt/nol8/UPSTREAM"
 	git -C "$wt" add -- nol8/UPSTREAM || die "staging nol8/UPSTREAM failed in $wt; is another git using it?"
+	# The commit the release tag points to, so the release traces to an exact
+	# upstream commit and not only to a tag name.
+	rm -f "$wt/nol8/UPSTREAM-COMMIT"
+	printf '%s\n' "$upstream" >"$wt/nol8/UPSTREAM-COMMIT"
+	git -C "$wt" add -- nol8/UPSTREAM-COMMIT || die "staging nol8/UPSTREAM-COMMIT failed in $wt; is another git using it?"
 	found=0
 	git -C "$wt" grep --cached -q -E '^(<<<<<<<|[|]{7}|>>>>>>>)( |$)' || found=$?
 	case $found in

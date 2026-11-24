@@ -1,7 +1,8 @@
 name: nol8 upstream
 
 # nol8: keeps this fork on upstream quic-go (see "Ownership and security" and
-# "Updating to a new upstream release" in README.md). Every month and on demand:
+# "Updating to a new upstream release" in README.md). The advisory check runs every
+# day, the sync every month, and both on demand:
 # - "Upstream advisories" checks the upstream release in nol8/UPSTREAM for
 #   upstream's own advisories, which govulncheck doesn't report for this
 #   module path, and scans this checkout. It also runs on every pull request,
@@ -13,7 +14,10 @@ name: nol8 upstream
 
 on:
   schedule:
-    - cron: "23 6 1 * *"
+    # Daily: the advisory check. A monthly check can't meet the 7-day fix target.
+    - cron: "23 6 * * *"
+    # Monthly: also the sync.
+    - cron: "41 6 1 * *"
   pull_request:
   workflow_dispatch:
 
@@ -43,8 +47,12 @@ jobs:
 
   sync:
     name: Upstream sync
-    # nol8/sync.sh builds on master, and only master runs the schedule.
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    # nol8/sync.sh builds on master, and only master runs the schedule. The daily
+    # schedule is the advisory check; only the monthly one syncs.
+    if: >-
+      github.ref == 'refs/heads/master' && (
+      github.event_name == 'workflow_dispatch' ||
+      github.event.schedule == '41 6 1 * *')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:

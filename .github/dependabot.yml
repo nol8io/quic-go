@@ -4,3 +4,9 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+  # nol8: the library's Go dependencies. Updates arrive as pull requests for the
+  # owner to review; Dependabot security updates need the alerts setting on.
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"

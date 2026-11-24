@@ -103,8 +103,12 @@ these changes.
    generated mocks, and in the package paths in CI and build scripts. Links to upstream
    issues, pull requests and documentation still point upstream.
 4. This section of the README.
-5. **Fork maintenance.** `nol8/UPSTREAM` names the upstream release that `master` holds.
-   The scripts `nol8/sync.sh`, `nol8/sync-pr.sh` and `nol8/advisories.sh` move the fork to
+5. **Fork maintenance.** `nol8/UPSTREAM` names the upstream release that `master` holds,
+   and `nol8/UPSTREAM-COMMIT` the upstream commit that release's tag points to;
+   `nol8/sync.sh` writes both. [`nol8/PATCHES.md`](nol8/PATCHES.md) lists the nol8 changes.
+   `.github/CODEOWNERS`, `.github/dependabot.yml` and the workflows `nol8-codeql.yml` and
+   `nol8-sbom.yml` are part of the security baseline (see
+   [Ownership and security](#ownership-and-security)). The scripts `nol8/sync.sh`, `nol8/sync-pr.sh` and `nol8/advisories.sh` move the fork to
    a new upstream release and check upstream's security advisories. The workflow
    `.github/workflows/nol8-upstream.yml` runs them (see
    [Updating to a new upstream release](#updating-to-a-new-upstream-release) and
@@ -231,18 +235,40 @@ lists only this fork's tags. Never fetch upstream with its tags, and push branch
   check alone can't meet the 7 days. `govulncheck` matches advisories by module path, so a
   scan of this fork never reports upstream quic-go's own advisories. The "Upstream
   advisories" job in `.github/workflows/nol8-upstream.yml` therefore runs two checks, every
-  month, on every pull request and on demand:
+  day, on every pull request and on demand:
   - `nol8/advisories.sh` checks the upstream release in `nol8/UPSTREAM` against the Go
     vulnerability database, and fails on any upstream quic-go advisory that affects it. A
     sync's pull request therefore checks the release it moves to. Run
     `nol8/advisories.sh vX.Y.Z` to check a release before syncing to it.
   - `govulncheck ./...` covers this fork's dependencies and the standard library.
 
-  When a scheduled run fails, GitHub notifies whoever last changed the workflow's schedule
-  or last enabled the workflow, so that should be the owner. GitHub can
+  When a scheduled run fails, GitHub notifies whoever last changed the workflow's
+  schedule or last enabled the workflow, so that should be the owner. This fork has
+  issues disabled, so the workflow opens none. The owner turns on notifications for
+  failed workflow runs in their GitHub settings. GitHub can
   disable scheduled workflows in a fork, and does in a public repository after 60 days
   without activity. The owner checks with `gh workflow list` that "nol8 upstream" is
   active, and enables it with `gh workflow enable nol8-upstream.yml`.
+- **Dependencies and code scanning:** Dependabot opens weekly pull requests for the Go
+  modules and the workflows' actions, and (when enabled in the repository settings) alerts
+  and security updates. `nol8-codeql.yml` runs CodeQL on every pull request, on `master`
+  and weekly. Secret scanning and push protection are enabled in the repository settings.
+- **Review and releases:** `master` takes changes only through a pull request that the
+  owner or another member of the SDK team approves and whose checks pass (a branch
+  ruleset). A security update goes through those checks, and the SDK's own CI, before the
+  SDK adopts it; the SDK's release approval is the gate before production.
+- **SBOM and traceability:** each `-nol8.N` tag gets a CycloneDX SBOM (`nol8-sbom.yml`) on
+  its release. A product that ships this fork lists `github.com/nol8io/quic-go` at that
+  tag, and names the upstream release and commit from `nol8/UPSTREAM` and
+  `nol8/UPSTREAM-COMMIT` at that tag, and the changes in `nol8/PATCHES.md`.
+- **Sync token:** `NOL8_SYNC_TOKEN` is a fine-grained token limited to this repository,
+  with only the access listed under "Updating to a new upstream release", an expiry, and
+  no other copy than the repository secret.
+- **Fuzzing (accepted risk):** the four ClusterFuzz workflows are disabled (see above), so
+  this fork doesn't run upstream's continuous fuzzing. The risk is accepted: the fork's
+  own changes touch packet sizing and logging, not parsing, and upstream fuzzes its
+  parsers and fixes what it finds, which reaches this fork through a sync. The owner
+  reviews this when a change touches parsing code.
 - **Reporting:** report an issue in the fork's own change to the Data Path SDK team.
   Report anything else to upstream, as described in [SECURITY.md](SECURITY.md).
 

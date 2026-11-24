@@ -1,0 +1,49 @@
+name: nol8 SBOM
+
+# nol8: builds a CycloneDX software bill of materials for each fork release and
+# attaches it to the release, so a product that ships this fork can list it with its
+# version and upstream origin (see "Ownership and security" in README.md). The tag
+# vX.Y.Z-nol8.N names the fork release; nol8/UPSTREAM and nol8/UPSTREAM-COMMIT name
+# the upstream release and commit it holds.
+
+on:
+  push:
+    tags: ["v*-nol8.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    name: SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+          check-latest: true
+      - name: Build the SBOM
+        run: |
+          go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0 \
+            mod -json -licenses -output sbom.cdx.json .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sbom
+          path: sbom.cdx.json
+      - name: Attach the SBOM to the release
+        if: ${{ github.ref_type == 'tag' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "$TAG" --notes "nol8 fork of quic-go. See README.md."
+          gh release upload "$TAG" sbom.cdx.json --repo "$GITHUB_REPOSITORY" --clobber
