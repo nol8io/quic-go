@@ -242,9 +242,10 @@ lists only this fork's tags. Never fetch upstream with its tags, and push branch
     `nol8/advisories.sh vX.Y.Z` to check a release before syncing to it.
   - `govulncheck ./...` covers this fork's dependencies and the standard library.
 
-  When a scheduled run fails, the job opens an issue titled "Upstream advisories check
-  failed" (one at a time), and GitHub also notifies whoever last changed the workflow's
-  schedule or last enabled the workflow, so that should be the owner. GitHub can
+  When a scheduled run fails, GitHub notifies whoever last changed the workflow's
+  schedule or last enabled the workflow, so that should be the owner. This fork has
+  issues disabled, so the workflow opens none. The owner turns on notifications for
+  failed workflow runs in their GitHub settings. GitHub can
   disable scheduled workflows in a fork, and does in a public repository after 60 days
   without activity. The owner checks with `gh workflow list` that "nol8 upstream" is
   active, and enables it with `gh workflow enable nol8-upstream.yml`.
