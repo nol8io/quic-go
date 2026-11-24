@@ -20,8 +20,6 @@ import (
 	"github.com/nol8io/quic-go/qlogwriter"
 	"github.com/nol8io/quic-go/testutils/events"
 
-	"github.com/quic-go/qpack"
-
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 )
@@ -43,9 +41,8 @@ func TestStreamReadDataFrames(t *testing.T) {
 	clientConn, _ := newConnPair(t, withClientRecorder(&eventRecorder))
 	str := newStream(
 		qstr,
-		newRawConn(clientConn, false, nil, nopControlStrHandler, &eventRecorder, nil),
+		newRawConn(clientConn, false, 0, nil, nopControlStrHandler, &eventRecorder, nil),
 		nil,
-		func(io.Reader, *headersFrame) error { return nil },
 		&eventRecorder,
 	)
 	require.Same(t, clientConn.QlogTrace(), str.QlogTrace())
@@ -84,12 +81,13 @@ func TestStreamReadDataFrames(t *testing.T) {
 	eventRecorder.Clear()
 
 	buf.Write(getDataFrame([]byte("lorem")))
+	buf.Write(getDataFrame(nil))
 	buf.Write(getDataFrame([]byte("ipsum")))
 
 	data, err := io.ReadAll(str)
 	require.NoError(t, err)
 	require.Equal(t, "loremipsum", string(data))
-	require.Len(t, eventRecorder.Events(qlog.FrameParsed{}), 2)
+	require.Len(t, eventRecorder.Events(qlog.FrameParsed{}), 3)
 	eventRecorder.Clear()
 
 	// invalid frame
@@ -99,35 +97,75 @@ func TestStreamReadDataFrames(t *testing.T) {
 }
 
 func TestStreamInvalidFrame(t *testing.T) {
-	var buf bytes.Buffer
-	b := (&settingsFrame{}).Append(nil)
-	buf.Write(b)
+	var b bytes.Buffer
+	_, err := writeTrailers(&b, http.Header{"Foo": {"bar"}}, 42, nil)
+	require.NoError(t, err)
+	trailers := b.Bytes()
+	for _, tc := range []struct {
+		name string
+		data []byte
+		err  string
+		code ErrCode
+	}{
+		{
+			name: "unexpected frame",
+			data: (&settingsFrame{}).Append(nil),
+			err:  "peer sent an unexpected frame",
+			code: ErrCodeFrameUnexpected,
+		},
+		{
+			name: "DATA after trailers",
+			data: slices.Concat(trailers, getDataFrame([]byte("foo"))),
+			err:  "DATA frame received after trailers",
+			code: ErrCodeFrameUnexpected,
+		},
+		{
+			name: "HEADERS after trailers",
+			data: slices.Concat(trailers, trailers),
+			err:  "additional HEADERS frame received after trailers",
+			code: ErrCodeFrameUnexpected,
+		},
+		{
+			name: "truncated DATA",
+			data: getDataFrame([]byte("foobar"))[:5],
+			err:  "unexpected EOF",
+			code: ErrCodeFrameError,
+		},
+		{
+			name: "truncated trailers",
+			data: (&headersFrame{Length: 3}).Append(nil),
+			err:  "unexpected EOF",
+			code: ErrCodeFrameError,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := bytes.NewBuffer(tc.data)
+			mockCtrl := gomock.NewController(t)
+			qstr := NewMockDatagramStream(mockCtrl)
+			qstr.EXPECT().StreamID().Return(quic.StreamID(42)).AnyTimes()
+			qstr.EXPECT().Write(gomock.Any()).DoAndReturn(buf.Write).AnyTimes()
+			qstr.EXPECT().Read(gomock.Any()).DoAndReturn(buf.Read).AnyTimes()
+			clientConn, serverConn := newConnPair(t)
 
-	mockCtrl := gomock.NewController(t)
-	qstr := NewMockDatagramStream(mockCtrl)
-	qstr.EXPECT().StreamID().Return(quic.StreamID(42)).AnyTimes()
-	qstr.EXPECT().Write(gomock.Any()).DoAndReturn(buf.Write).AnyTimes()
-	qstr.EXPECT().Read(gomock.Any()).DoAndReturn(buf.Read).AnyTimes()
-	clientConn, serverConn := newConnPair(t)
+			str := newStream(
+				qstr,
+				newRawConn(clientConn, false, math.MaxInt, nil, nopControlStrHandler, nil, nil),
+				nil,
+				nil,
+			)
 
-	str := newStream(
-		qstr,
-		newRawConn(clientConn, false, nil, nopControlStrHandler, nil, nil),
-		nil,
-		func(io.Reader, *headersFrame) error { return nil },
-		nil,
-	)
+			_, err := io.ReadAll(str)
+			require.ErrorContains(t, err, tc.err)
 
-	_, err := str.Read([]byte{0})
-	require.ErrorContains(t, err, "peer sent an unexpected frame")
-
-	select {
-	case <-serverConn.Context().Done():
-		var appErr *quic.ApplicationError
-		require.ErrorAs(t, context.Cause(serverConn.Context()), &appErr)
-		require.Equal(t, quic.ApplicationErrorCode(ErrCodeFrameUnexpected), appErr.ErrorCode)
-	case <-time.After(time.Second):
-		t.Fatal("timeout")
+			select {
+			case <-serverConn.Context().Done():
+				var appErr *quic.ApplicationError
+				require.ErrorAs(t, context.Cause(serverConn.Context()), &appErr)
+				require.Equal(t, quic.ApplicationErrorCode(tc.code), appErr.ErrorCode)
+			case <-time.After(time.Second):
+				t.Fatal("timeout")
+			}
+		})
 	}
 }
 
@@ -139,7 +177,7 @@ func TestStreamWrite(t *testing.T) {
 	qstr.EXPECT().Write(gomock.Any()).DoAndReturn(buf.Write).AnyTimes()
 	var eventRecorder events.Recorder
 	clientConn, _ := newConnPair(t)
-	str := newStream(qstr, newRawConn(clientConn, false, nil, nopControlStrHandler, &eventRecorder, nil), nil, func(io.Reader, *headersFrame) error { return nil }, &eventRecorder)
+	str := newStream(qstr, newRawConn(clientConn, false, 0, nil, nopControlStrHandler, &eventRecorder, nil), nil, &eventRecorder)
 	str.Write([]byte("foo"))
 	str.Write([]byte("foobar"))
 
@@ -196,7 +234,7 @@ func TestStreamWriteRetry(t *testing.T) {
 				}
 				return buf.Write(b)
 			}).AnyTimes()
-			str := newStream(qstr, nil, nil, nil, nil)
+			str := newStream(qstr, nil, nil, nil)
 
 			n, err := str.Write(data)
 			require.ErrorIs(t, err, os.ErrDeadlineExceeded)
@@ -216,7 +254,7 @@ func TestStreamTryWriteAllAfterPartialWrite(t *testing.T) {
 	qstr.EXPECT().StreamID().Return(quic.StreamID(42)).AnyTimes()
 	qstr.EXPECT().Write((&dataFrame{Length: 6}).Append(nil)).DoAndReturn(io.Discard.Write)
 	qstr.EXPECT().Write([]byte("foobar")).Return(2, os.ErrDeadlineExceeded)
-	str := newStream(qstr, nil, nil, nil, nil)
+	str := newStream(qstr, nil, nil, nil)
 	_, err := str.Write([]byte("foobar"))
 	require.ErrorIs(t, err, os.ErrDeadlineExceeded)
 
@@ -229,13 +267,28 @@ func TestStreamTryWriteAllAfterPartialWrite(t *testing.T) {
 	require.NoError(t, str.TryWriteAll([]byte("obarbaz")))
 }
 
+func TestStreamCloseAfterPartialWrite(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	qstr := NewMockDatagramStream(mockCtrl)
+	qstr.EXPECT().StreamID().Return(quic.StreamID(42)).AnyTimes()
+	qstr.EXPECT().Write((&dataFrame{Length: 6}).Append(nil)).DoAndReturn(io.Discard.Write)
+	qstr.EXPECT().Write([]byte("foobar")).Return(2, os.ErrDeadlineExceeded)
+	str := newStream(qstr, nil, nil, nil)
+	_, err := str.Write([]byte("foobar"))
+	require.ErrorIs(t, err, os.ErrDeadlineExceeded)
+
+	// a FIN would truncate the DATA frame
+	qstr.EXPECT().CancelWrite(quic.StreamErrorCode(ErrCodeRequestCanceled))
+	require.Error(t, str.Close())
+}
+
 func TestStreamQlogWriteAfterConnectionClose(t *testing.T) {
 	clientConn, _ := newConnPair(t)
 	rec := &closeTrackingRecorder{closed: make(chan struct{})}
-	conn := newRawConn(clientConn, false, nil, nopControlStrHandler, rec, nil)
+	conn := newRawConn(clientConn, false, 0, nil, nopControlStrHandler, rec, nil)
 	qstr, err := clientConn.OpenStream()
 	require.NoError(t, err)
-	str := newStream(conn.TrackStream(qstr), conn, nil, nil, rec)
+	str := newStream(conn.TrackStream(qstr), conn, nil, rec)
 
 	clientConn.CloseWithError(0, "")
 	select {
@@ -257,7 +310,7 @@ func TestStreamTryWriteAll(t *testing.T) {
 
 	var eventRecorder events.Recorder
 	clientConn, _ := newConnPair(t)
-	str := newStream(qstr, newRawConn(clientConn, false, nil, nopControlStrHandler, &eventRecorder, nil), nil, func(io.Reader, *headersFrame) error { return nil }, &eventRecorder)
+	str := newStream(qstr, newRawConn(clientConn, false, 0, nil, nopControlStrHandler, &eventRecorder, nil), nil, &eventRecorder)
 	require.NoError(t, str.TryWriteAll([]byte("foobar")))
 	require.ErrorIs(t, str.TryWriteAll([]byte("blocked")), quic.ErrWouldBlock)
 
@@ -280,20 +333,18 @@ func TestRequestStream(t *testing.T) {
 	qstr.EXPECT().StreamID().Return(quic.StreamID(42)).AnyTimes()
 	requestWriter := newRequestWriter()
 	clientConn, _ := newConnPair(t)
+	conn := newRawConn(clientConn, false, math.MaxInt, nil, nopControlStrHandler, nil, nil)
 	str := newRequestStream(
 		newStream(
 			qstr,
-			newRawConn(clientConn, false, nil, nopControlStrHandler, nil, nil),
+			conn,
 			&httptrace.ClientTrace{},
-			func(io.Reader, *headersFrame) error { return nil },
 			nil,
 		),
+		conn,
 		requestWriter,
 		make(chan struct{}),
-		qpack.NewDecoder(),
 		true,
-		math.MaxInt,
-		&http.Response{},
 	)
 	require.Same(t, clientConn.QlogTrace(), str.QlogTrace())
 
@@ -316,6 +367,13 @@ func TestRequestStream(t *testing.T) {
 		),
 		"http3: invalid use of RequestStream.SendRequestHeader with a request that has a request body",
 	)
+	// Extended CONNECT requests wait for the server's SETTINGS, unless the stream is canceled
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(&quic.StreamError{StreamID: 42, ErrorCode: 1337})
+	qstr.EXPECT().Context().Return(ctx)
+	connectReq := httptest.NewRequest(http.MethodConnect, "https://quic-go.net", nil)
+	connectReq.Proto = "connect"
+	require.ErrorIs(t, str.SendRequestHeader(connectReq), &Error{ErrorCode: 1337})
 
 	req := httptest.NewRequest(http.MethodGet, "https://quic-go.net", nil)
 	qstr.EXPECT().Write(gomock.Any()).AnyTimes()

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -243,15 +244,21 @@ func testServerRequestHandling(t *testing.T,
 	return hfs, content
 }
 
-func TestServerFirstFrameNotHeaders(t *testing.T) {
+func TestServerInvalidFirstFrame(t *testing.T) {
+	t.Run("not a HEADERS frame", func(t *testing.T) {
+		testServerInvalidFirstFrame(t, getDataFrame([]byte("foobar")), ErrCodeFrameUnexpected)
+	})
+	t.Run("truncated HEADERS frame", func(t *testing.T) {
+		testServerInvalidFirstFrame(t, (&headersFrame{Length: 10}).Append(nil), ErrCodeFrameError)
+	})
+}
+
+func testServerInvalidFirstFrame(t *testing.T, data []byte, expectedErr ErrCode) {
 	clientConn, serverConn := newConnPair(t)
 	str, err := clientConn.OpenStream()
 	require.NoError(t, err)
 
-	var buf bytes.Buffer
-	buf.Write((&dataFrame{Length: 6}).Append(nil))
-	buf.Write([]byte("foobar"))
-	_, err = str.Write(buf.Bytes())
+	_, err = str.Write(data)
 	require.NoError(t, err)
 	require.NoError(t, str.Close())
 
@@ -263,7 +270,7 @@ func TestServerFirstFrameNotHeaders(t *testing.T) {
 		err := context.Cause(clientConn.Context())
 		var appErr *quic.ApplicationError
 		require.ErrorAs(t, err, &appErr)
-		require.Equal(t, quic.ApplicationErrorCode(ErrCodeFrameUnexpected), appErr.ErrorCode)
+		require.Equal(t, quic.ApplicationErrorCode(expectedErr), appErr.ErrorCode)
 	case <-time.After(time.Second):
 		t.Fatal("timeout")
 	}
@@ -363,6 +370,98 @@ func TestServerStreamResetByClient(t *testing.T) {
 
 	expectStreamReadReset(t, str, quic.StreamErrorCode(ErrCodeRequestIncomplete))
 	require.False(t, called)
+}
+
+func TestServerConnectHeadersAfterRequest(t *testing.T) {
+	clientConn, serverConn := newConnPair(t)
+	str, err := clientConn.OpenStream()
+	require.NoError(t, err)
+	_, err = str.Write(encodeRequest(t, httptest.NewRequest(http.MethodConnect, "https://example.com", nil)))
+	require.NoError(t, err)
+	// only DATA frames are allowed on a CONNECT stream
+	_, err = writeTrailers(str, http.Header{"Foo": {"bar"}}, str.StreamID(), nil)
+	require.NoError(t, err)
+
+	go (&Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.ReadAll(r.Body) }),
+	}).ServeQUICConn(serverConn)
+
+	select {
+	case <-clientConn.Context().Done():
+		require.ErrorIs(t,
+			context.Cause(clientConn.Context()),
+			&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(ErrCodeFrameUnexpected)},
+		)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for close")
+	}
+}
+
+func TestServerRejectsDatagrams(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodConnect} {
+		t.Run(method, func(t *testing.T) {
+			clientConn, serverConn := newConnPair(t, withDatagrams())
+			controlStr, err := clientConn.OpenUniStream()
+			require.NoError(t, err)
+			_, err = controlStr.Write((&settingsFrame{Datagram: true}).Append(quicvarint.Append(nil, streamTypeControlStream)))
+			require.NoError(t, err)
+			req, err := http.NewRequest(method, "https://www.example.com", nil)
+			require.NoError(t, err)
+			str, err := clientConn.OpenStream()
+			require.NoError(t, err)
+			_, err = str.Write(encodeRequest(t, req))
+			require.NoError(t, err)
+
+			handlerStarted := make(chan struct{})
+			s := &Server{
+				EnableDatagrams: true,
+				Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					close(handlerStarted)
+					<-r.Context().Done()
+				}),
+			}
+			go s.ServeQUICConn(serverConn)
+
+			select {
+			case <-handlerStarted:
+			case <-time.After(time.Second):
+				t.Fatal("timeout")
+			}
+			require.NoError(t, clientConn.SendDatagram(quicvarint.Append(nil, uint64(str.StreamID()/4))))
+			expectStreamReadReset(t, str, quic.StreamErrorCode(ErrCodeDatagramError))
+		})
+	}
+}
+
+func TestServerReadHeaderTimeout(t *testing.T) {
+	clientConn, serverConn := newConnPair(t)
+	s := &Server{
+		ReadHeaderTimeout: scaleDuration(20 * time.Millisecond),
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, err := io.ReadAll(r.Body); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+			}
+		}),
+	}
+	go s.ServeQUICConn(serverConn)
+	req := encodeRequest(t, httptest.NewRequest(http.MethodPost, "https://example.com", bytes.NewBufferString("foobar")))
+
+	str, err := clientConn.OpenStream()
+	require.NoError(t, err)
+	_, err = str.Write(req[:5]) // incomplete HEADERS frame
+	require.NoError(t, err)
+	expectStreamReadReset(t, str, quic.StreamErrorCode(ErrCodeRequestIncomplete))
+
+	// the timeout doesn't apply to the request body
+	str, err = clientConn.OpenStream()
+	require.NoError(t, err)
+	_, err = str.Write(req[:len(req)-1])
+	require.NoError(t, err)
+	time.Sleep(2 * s.ReadHeaderTimeout)
+	_, err = str.Write(req[len(req)-1:])
+	require.NoError(t, err)
+	require.NoError(t, str.Close())
+	require.Equal(t, []string{"200"}, decodeHeader(t, str)[":status"])
 }
 
 func TestServerPanickingHandler(t *testing.T) {
@@ -553,7 +652,7 @@ func TestServerQlogClosedAfterHandlerReturns(t *testing.T) {
 		<-block
 	})
 	rec := &closeTrackingRecorder{closed: make(chan struct{})}
-	conn := newRawServerConn(serverConn, false, 0, rec, nil, context.Background(), handler, 0)
+	conn := newRawServerConn(serverConn, false, 0, rec, nil, context.Background(), handler, http.DefaultMaxHeaderBytes)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -592,9 +691,9 @@ func TestServerHTTPStreamHijacking(t *testing.T) {
 
 	s := &Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			str := w.(HTTPStreamer).HTTPStream()
 			w.WriteHeader(http.StatusOK)
-			str, err := w.(HTTPStreamer).HTTPStream()
-			if err != nil {
+			if err := http.NewResponseController(w).Flush(); err != nil {
 				return
 			}
 			str.Write([]byte("foobar"))
@@ -631,7 +730,7 @@ func TestServerHTTPStreamHijackingWithoutResponse(t *testing.T) {
 	errChan := make(chan error, 1)
 	s := &Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			str, _ := w.(HTTPStreamer).HTTPStream()
+			str := w.(HTTPStreamer).HTTPStream()
 			_, err := str.Write([]byte("foobar"))
 			errChan <- err
 			str.CancelWrite(quic.StreamErrorCode(ErrCodeRequestRejected))
@@ -679,10 +778,15 @@ func testServerAltSvcFromListenersAndConns(t *testing.T, versions []quic.Version
 		TLSConfig:  getTLSConfig(),
 		QUICConfig: &quic.Config{Versions: versions},
 	}
+	// two listeners on the same port are only announced once
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() { s.ServeListener(ln1) })
+	}
 	done1 := make(chan struct{})
 	go func() {
-		defer close(done1)
-		s.ServeListener(ln1)
+		wg.Wait()
+		close(done1)
 	}()
 	time.Sleep(scaleDuration(10 * time.Millisecond))
 	altSvc, ok := getAltSvc(s)

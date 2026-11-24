@@ -1315,7 +1315,8 @@ func TestSentPacketHandler0RTT(t *testing.T) {
 
 func TestSentPacketHandlerCongestion(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
-	cong := mocks.NewMockSendAlgorithmWithDebugInfos(mockCtrl)
+	cong := mocks.NewMockSendAlgorithm(mockCtrl)
+	cong.EXPECT().GetCongestionWindow().AnyTimes()
 	rttStats := utils.NewRTTStats()
 	sph := NewSentPacketHandler(
 		0,
@@ -1346,7 +1347,7 @@ func TestSentPacketHandlerCongestion(t *testing.T) {
 		require.Equal(t, SendAny, sph.SendMode(now))
 		pn := sph.PopPacketNumber(protocol.PacketNumberSpaceInitial)
 		bytesInFlight += 1000
-		cong.EXPECT().OnPacketSent(now, bytesInFlight, pn, protocol.ByteCount(1000), true)
+		cong.EXPECT().OnPacketSent(now, pn, protocol.ByteCount(1000), true)
 		sph.SentPacket(now, pn, protocol.InvalidPacketNumber, nil, []Frame{packets.NewPingFrame(pn)}, protocol.EncryptionInitial, protocol.ECNNon, 1000, i == 1, false)
 		pns = append(pns, pn)
 		sendTimes = append(sendTimes, now)
@@ -1362,7 +1363,7 @@ func TestSentPacketHandlerCongestion(t *testing.T) {
 	require.Equal(t, SendPacingLimited, sph.SendMode(now))
 	// the connection would call TimeUntilSend, to find out when a new packet can be sent again
 	pacingDeadline := now.Add(500 * time.Millisecond)
-	cong.EXPECT().TimeUntilSend(bytesInFlight).Return(pacingDeadline)
+	cong.EXPECT().TimeUntilSend().Return(pacingDeadline)
 	require.Equal(t, pacingDeadline, sph.TimeUntilSend())
 
 	// try to send another packet, but now we're congestion limited
@@ -1376,9 +1377,9 @@ func TestSentPacketHandlerCongestion(t *testing.T) {
 	ackTime := sendTimes[3].Add(time.Second)
 	gomock.InOrder(
 		cong.EXPECT().MaybeExitSlowStart(),
-		cong.EXPECT().OnCongestionEvent(pns[0], protocol.ByteCount(1000), protocol.ByteCount(5000)),
-		cong.EXPECT().OnPacketAcked(pns[2], protocol.ByteCount(1000), protocol.ByteCount(5000), ackTime),
-		cong.EXPECT().OnPacketAcked(pns[3], protocol.ByteCount(1000), protocol.ByteCount(5000), ackTime),
+		cong.EXPECT().OnCongestionEvent(pns[0]),
+		cong.EXPECT().OnPacketAcked(pns[2], protocol.ByteCount(5000)),
+		cong.EXPECT().OnPacketAcked(pns[3], protocol.ByteCount(5000)),
 	)
 	_, err := sph.ReceivedAck(&wire.AckFrame{AckRanges: ackRanges(pns[2], pns[3])}, protocol.EncryptionInitial, ackTime)
 	require.NoError(t, err)
@@ -1399,8 +1400,9 @@ func TestSentPacketHandlerCongestion(t *testing.T) {
 	// send another packet to check that bytes_in_flight was correctly adjusted
 	now = timeout.Add(100 * time.Millisecond)
 	pn := sph.PopPacketNumber(protocol.PacketNumberSpaceInitial)
-	cong.EXPECT().OnPacketSent(now, protocol.ByteCount(2000), pn, protocol.ByteCount(1000), true)
+	cong.EXPECT().OnPacketSent(now, pn, protocol.ByteCount(1000), true)
 	sph.SentPacket(now, pn, protocol.InvalidPacketNumber, nil, []Frame{packets.NewPingFrame(pn)}, protocol.EncryptionInitial, protocol.ECNNon, 1000, false, false)
+	require.Equal(t, protocol.ByteCount(2000), sph.(*sentPacketHandler).getBytesInFlight())
 }
 
 func TestSentPacketHandlerRetry(t *testing.T) {
@@ -1511,18 +1513,20 @@ func TestSentPacketHandlerRetryAfterPTO(t *testing.T) {
 
 func TestSentPacketHandlerECN(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
-	cong := mocks.NewMockSendAlgorithmWithDebugInfos(mockCtrl)
-	cong.EXPECT().OnPacketSent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
-	cong.EXPECT().OnPacketAcked(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
+	cong := mocks.NewMockSendAlgorithm(mockCtrl)
+	cong.EXPECT().GetCongestionWindow().AnyTimes()
+	cong.EXPECT().OnPacketSent(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
+	cong.EXPECT().OnPacketAcked(gomock.Any(), gomock.Any()).AnyTimes()
 	cong.EXPECT().MaybeExitSlowStart().AnyTimes()
 	ecnHandler := NewMockECNHandler(mockCtrl)
+	rttStats := utils.NewRTTStats()
 	sph := NewSentPacketHandler(
 		0,
 		1200,
-		utils.NewRTTStats(),
+		rttStats,
 		&utils.ConnectionStats{},
 		true,
-		false,
+		true,
 		nil,
 		protocol.PerspectiveClient,
 		nil,
@@ -1536,11 +1540,17 @@ func TestSentPacketHandlerECN(t *testing.T) {
 	sph.SentPacket(monotime.Now(), sph.PopPacketNumber(protocol.PacketNumberSpaceHandshake), protocol.InvalidPacketNumber, nil, nil, protocol.EncryptionHandshake, protocol.ECT0, 1200, false, false)
 	sph.SentPacket(monotime.Now(), sph.PopPacketNumber(protocol.PacketNumberSpaceAppData), protocol.InvalidPacketNumber, nil, nil, protocol.Encryption0RTT, protocol.ECNCE, 1200, false, false)
 
+	// ECN is only used after handshake confirmation
+	require.Equal(t, protocol.ECNNon, sph.ECNMode(true))
+	sph.DropPackets(protocol.EncryptionHandshake, monotime.Now())
+	ecnHandler.EXPECT().Mode().Return(protocol.ECT1)
+	require.Equal(t, protocol.ECT1, sph.ECNMode(true))
+
 	var packets packetTracker
 	sendPacket := func(t *testing.T, ti monotime.Time, ecn protocol.ECN) protocol.PacketNumber {
 		t.Helper()
 		pn := sph.PopPacketNumber(protocol.PacketNumberSpaceAppData)
-		ecnHandler.EXPECT().SentPacket(pn, ecn)
+		ecnHandler.EXPECT().SentPacket(ti, pn, ecn)
 		sph.SentPacket(ti, pn, protocol.InvalidPacketNumber, nil, []Frame{packets.NewPingFrame(pn)}, protocol.Encryption1RTT, ecn, 1200, false, false)
 		return pn
 	}
@@ -1548,14 +1558,18 @@ func TestSentPacketHandlerECN(t *testing.T) {
 	pns := make([]protocol.PacketNumber, 4)
 	now := monotime.Now()
 	pns[0] = sendPacket(t, now, protocol.ECT1)
+	ackOnly := sph.PopPacketNumber(protocol.PacketNumberSpaceAppData)
+	ecnHandler.EXPECT().SentPacket(now, ackOnly, protocol.ECT1)
+	sph.SentPacket(now, ackOnly, protocol.InvalidPacketNumber, nil, nil, protocol.Encryption1RTT, protocol.ECT1, 100, false, false)
 	now = now.Add(time.Second)
 	pns[1] = sendPacket(t, now, protocol.ECT0)
 	pns[2] = sendPacket(t, now, protocol.ECT0)
 	pns[3] = sendPacket(t, now, protocol.ECT0)
 
 	// Receive an ACK with a short RTT, such that the first packet is lost.
-	cong.EXPECT().OnCongestionEvent(gomock.Any(), gomock.Any(), gomock.Any())
+	cong.EXPECT().OnCongestionEvent(gomock.Any())
 	ecnHandler.EXPECT().LostPacket(pns[0])
+	ecnHandler.EXPECT().LostPacket(ackOnly) // ACK-only packets are reported as lost as well
 	ecnHandler.EXPECT().HandleNewlyAcked(gomock.Any(), int64(10), int64(11), int64(12)).DoAndReturn(func(packets []packetWithPacketNumber, _, _, _ int64) bool {
 		require.Len(t, packets, 2)
 		require.Equal(t, pns[2], packets[0].PacketNumber)
@@ -1580,8 +1594,8 @@ func TestSentPacketHandlerECN(t *testing.T) {
 	pn := sendPacket(t, now, protocol.ECT0)
 	gomock.InOrder(
 		ecnHandler.EXPECT().HandleNewlyAcked(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(true),
-		cong.EXPECT().OnCongestionEvent(pn, protocol.ByteCount(0), gomock.Any()),
-		cong.EXPECT().OnCongestionEvent(pns[1], protocol.ByteCount(1200), gomock.Any()),
+		cong.EXPECT().OnCongestionEvent(pn),
+		cong.EXPECT().OnCongestionEvent(pns[1]),
 		ecnHandler.EXPECT().LostPacket(pns[1]),
 		cong.EXPECT().OnSpuriousLoss(pns[0]),
 	)
@@ -1623,10 +1637,19 @@ func TestSentPacketHandlerECN(t *testing.T) {
 
 	gomock.InOrder(
 		ecnHandler.EXPECT().HandleNewlyAcked(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(true),
-		cong.EXPECT().OnCongestionEvent(pns[0], protocol.ByteCount(0), gomock.Any()),
+		cong.EXPECT().OnCongestionEvent(pns[0]),
 	)
 	_, err = sph.ReceivedAck(&wire.AckFrame{AckRanges: ackRanges(pns[0])}, protocol.Encryption1RTT, now.Add(100*time.Millisecond))
 	require.NoError(t, err)
+
+	// Packets declared lost for a PTO probe are reported to the ECN handler.
+	pn = sendPacket(t, now, protocol.ECT0)
+	ecnHandler.EXPECT().LostPacket(pn)
+	require.True(t, sph.QueueProbePacket(protocol.PacketNumberSpaceAppData))
+
+	// ECN validation waits for 3 PTOs of the old path after the migration
+	ecnHandler.EXPECT().MigratedPath(now.Add(3 * rttStats.PTO(true)))
+	sph.MigratedPath(now, 1200)
 }
 
 func TestSentPacketHandlerPathProbe(t *testing.T) {
@@ -1904,6 +1927,8 @@ func TestSentPacketHandlerSpuriousLoss(t *testing.T) {
 	// pns[4] and pns[5] are not yet declared lost
 	require.Equal(t, []protocol.PacketNumber{pns[1], pns[2], pns[3]}, packets.Lost)
 	require.Less(t, connStats.CongestionWindow.Load(), window)
+	require.Equal(t, int64(3), connStats.PacketsLost.Load())
+	require.Equal(t, int64(3000), connStats.BytesLost.Load())
 
 	packets.Reset()
 	eventRecorder.Clear()
@@ -1920,6 +1945,8 @@ func TestSentPacketHandlerSpuriousLoss(t *testing.T) {
 	require.Equal(t, []protocol.PacketNumber{pns[4], pns[5], pns[12], pns[16]}, packets.Acked)
 	require.Empty(t, packets.Lost)
 	require.Equal(t, window, connStats.CongestionWindow.Load())
+	require.Zero(t, connStats.PacketsLost.Load())
+	require.Zero(t, connStats.BytesLost.Load())
 	require.Equal(t,
 		[]qlogwriter.Event{
 			qlog.SpuriousLoss{

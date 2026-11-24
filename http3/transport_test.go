@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/nol8io/quic-go"
@@ -212,6 +213,20 @@ func TestTransportMultipleQUICVersions(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "https://example.com", nil)
 	_, err := tr.RoundTrip(req)
 	require.EqualError(t, err, "can only use a single QUIC version for dialing a HTTP/3 connection")
+}
+
+func TestTransportDoesNotModifyQUICConfig(t *testing.T) {
+	qconf := &quic.Config{Versions: []quic.Version{quic.Version1}}
+	tr := &Transport{
+		QUICConfig: qconf,
+		Dial: func(context.Context, string, *tls.Config, *quic.Config) (*quic.Conn, error) {
+			return nil, assert.AnError
+		},
+	}
+	_, err := tr.RoundTrip(httptest.NewRequest(http.MethodGet, "https://example.com", nil))
+	require.ErrorIs(t, err, assert.AnError)
+	require.Zero(t, qconf.MaxIncomingStreams)
+	require.Equal(t, int64(-1), tr.QUICConfig.MaxIncomingStreams)
 }
 
 func TestTransportConnectionReuse(t *testing.T) {
@@ -454,7 +469,7 @@ func TestTransportConnetionRedialHandshakeError(t *testing.T) {
 
 func TestTransportCloseEstablishedConnections(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
-	conn, _ := newConnPair(t)
+	conn, serverConn := newConnPair(t)
 	tr := &Transport{
 		Dial: func(context.Context, string, *tls.Config, *quic.Config) (*quic.Conn, error) {
 			return conn, nil
@@ -471,7 +486,11 @@ func TestTransportCloseEstablishedConnections(t *testing.T) {
 	require.NoError(t, tr.Close())
 
 	select {
-	case <-conn.Context().Done():
+	case <-serverConn.Context().Done():
+		require.ErrorIs(t,
+			context.Cause(serverConn.Context()),
+			&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(ErrCodeNoError)},
+		)
 	case <-time.After(time.Second):
 		t.Fatal("timeout")
 	}
@@ -515,8 +534,8 @@ func TestTransportCloseInFlightDials(t *testing.T) {
 
 func TestTransportCloseIdleConnections(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
-	conn1, _ := newConnPair(t)
-	conn2, _ := newConnPair(t)
+	conn1, serverConn1 := newConnPair(t)
+	conn2, serverConn2 := newConnPair(t)
 	roundTripCalled := make(chan struct{})
 	tr := &Transport{
 		Dial: func(_ context.Context, hostname string, _ *tls.Config, _ *quic.Config) (*quic.Conn, error) {
@@ -537,6 +556,7 @@ func TestTransportCloseIdleConnections(t *testing.T) {
 				<-r.Context().Done()
 				return nil, nil
 			})
+			cl.EXPECT().hasActiveStreams().Return(false)
 			return cl
 		},
 	}
@@ -564,7 +584,11 @@ func TestTransportCloseIdleConnections(t *testing.T) {
 	// req1 is finished
 	tr.CloseIdleConnections()
 	select {
-	case <-conn1.Context().Done():
+	case <-serverConn1.Context().Done():
+		require.ErrorIs(t,
+			context.Cause(serverConn1.Context()),
+			&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(ErrCodeNoError)},
+		)
 	case <-time.After(time.Second):
 		t.Fatal("timeout")
 	}
@@ -574,10 +598,35 @@ func TestTransportCloseIdleConnections(t *testing.T) {
 	// all requests are finished
 	tr.CloseIdleConnections()
 	select {
-	case <-conn2.Context().Done():
+	case <-serverConn2.Context().Done():
+		require.ErrorIs(t,
+			context.Cause(serverConn2.Context()),
+			&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(ErrCodeNoError)},
+		)
 	case <-time.After(time.Second):
 		t.Fatal("timeout")
 	}
+}
+
+func TestTransportCloseIdleConnectionsInFlightDial(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		dialErr := make(chan error, 1)
+		tr := &Transport{
+			Dial: func(ctx context.Context, _ string, _ *tls.Config, _ *quic.Config) (*quic.Conn, error) {
+				<-ctx.Done()
+				dialErr <- ctx.Err()
+				return nil, ctx.Err()
+			},
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := tr.RoundTrip(httptest.NewRequestWithContext(ctx, http.MethodGet, "https://quic-go.net", nil))
+		require.ErrorIs(t, err, context.Canceled)
+
+		// no request is waiting for the dial anymore
+		tr.CloseIdleConnections()
+		require.ErrorIs(t, <-dialErr, context.Canceled)
+	})
 }
 
 func TestTransportClose(t *testing.T) {

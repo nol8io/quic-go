@@ -9,6 +9,7 @@ import (
 	"github.com/nol8io/quic-go/internal/ackhandler"
 	"github.com/nol8io/quic-go/internal/monotime"
 	"github.com/nol8io/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/internal/udp"
 	"github.com/nol8io/quic-go/internal/wire"
 
 	"github.com/stretchr/testify/require"
@@ -130,7 +131,7 @@ func testNewPathPacketSizeServerNATRebinding(t *testing.T, config *Config, df bo
 			connectionOptHandshakeConfirmed(),
 			connectionOptRTT(time.Second),
 		)
-		tc.sendConn.EXPECT().capabilities().Return(connCapabilities{DF: df}).AnyTimes()
+		tc.sendConn.EXPECT().capabilities().Return(udp.Capabilities{DF: df}).AnyTimes()
 		require.NoError(t, tc.conn.handleTransportParameters(&wire.TransportParameters{
 			MaxUDPPayloadSize:         mps12PeerMaxUDPPayloadSize,
 			MaxDatagramFrameSize:      mps12PeerMaxDatagramFrameSize,
@@ -157,13 +158,13 @@ func testNewPathPacketSizeServerNATRebinding(t *testing.T, config *Config, df bo
 				protocol.PacketNumber(10), protocol.PacketNumberLen2, protocol.KeyPhaseZero, []byte{1}, nil,
 			),
 			tc.packer.EXPECT().PackPathProbePacket(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
-				func(_ protocol.ConnectionID, frames []ackhandler.Frame, _ protocol.Version) (shortHeaderPacket, *packetBuffer, error) {
+				func(_ protocol.ConnectionID, frames []ackhandler.Frame, _ protocol.Version) (shortHeaderPacket, *udp.PacketBuffer, error) {
 					pathChallenge = frames[0].Frame.(*wire.PathChallengeFrame)
-					return shortHeaderPacket{IsPathProbePacket: true}, getPacketBuffer(), nil
+					return shortHeaderPacket{IsPathProbePacket: true}, udp.GetPacketBuffer(), nil
 				},
 			),
-			tc.sendConn.EXPECT().WriteTo(gomock.Any(), newRemoteAddr, packetInfo{}).DoAndReturn(
-				func([]byte, net.Addr, packetInfo) error { close(probeSent); return nil },
+			tc.sendConn.EXPECT().WriteTo(gomock.Any(), newRemoteAddr, udp.PacketInfo{}).DoAndReturn(
+				func([]byte, net.Addr, udp.PacketInfo) error { close(probeSent); return nil },
 			),
 			tc.packer.EXPECT().AppendPacket(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(
 				shortHeaderPacket{}, errNothingToPack,
@@ -172,7 +173,7 @@ func testNewPathPacketSizeServerNATRebinding(t *testing.T, config *Config, df bo
 
 		tc.conn.handlePacket(receivedPacket{
 			data:       make([]byte, 10),
-			buffer:     getPacketBuffer(),
+			buffer:     udp.GetPacketBuffer(),
 			remoteAddr: newRemoteAddr,
 			rcvTime:    monotime.Now(),
 		})
@@ -195,16 +196,16 @@ func testNewPathPacketSizeServerNATRebinding(t *testing.T, config *Config, df bo
 				protocol.PacketNumber(11), protocol.PacketNumberLen2, protocol.KeyPhaseZero, data, nil,
 			),
 			tc.sendConn.EXPECT().ChangeRemoteAddr(newRemoteAddr, gomock.Any()).Do(
-				func(net.Addr, packetInfo) { close(migrated) },
+				func(net.Addr, udp.PacketInfo) { close(migrated) },
 			),
 			tc.packer.EXPECT().AppendPacket(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(
 				shortHeaderPacket{}, errNothingToPack,
-			).MaxTimes(1),
+			).AnyTimes(),
 		)
 		require.Equal(t, tc.remoteAddr, tc.conn.RemoteAddr())
 		tc.conn.handlePacket(receivedPacket{
 			data:       make([]byte, 100),
-			buffer:     getPacketBuffer(),
+			buffer:     udp.GetPacketBuffer(),
 			remoteAddr: newRemoteAddr,
 			rcvTime:    monotime.Now(),
 		})
@@ -263,7 +264,7 @@ func testNewPathPacketSizeClientSwitch(t *testing.T, config *Config, df bool, ex
 
 		conn := NewMockRawConn(mockCtrl)
 		conn.EXPECT().LocalAddr().Return(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4321})
-		conn.EXPECT().capabilities().Return(connCapabilities{DF: df}).AnyTimes()
+		conn.EXPECT().Capabilities().Return(udp.Capabilities{DF: df}).AnyTimes()
 		oldSender.EXPECT().Close()
 		tc.conn.switchToNewPath(&Transport{conn: conn}, now)
 		defer tc.conn.sendQueue.Close()

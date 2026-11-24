@@ -84,8 +84,8 @@ these changes.
      with the `log` package, as upstream. Only an application that sets a qlog tracer
      reaches that code; the SDK doesn't.
    - The `http3` package still logs through `slog.Default()` when its `Server` has no
-     `Logger`, as upstream: `http3/server.go:438` (a listener whose port can't be read),
-     `http3/server_conn.go:239` (a handler panic) and `http3/response_writer.go:129` (a
+     `Logger`, as upstream: `http3/server.go:441` (a listener whose port can't be read),
+     `http3/server_conn.go:186` (a handler panic) and `http3/response_writer.go:127` (a
      malformed `Content-Length`). The default handler writes to stderr. Only an
      application that runs an HTTP/3 server without a logger reaches that code; neither
      the SDK nor Argus imports `http3`.

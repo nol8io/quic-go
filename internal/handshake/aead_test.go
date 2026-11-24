@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/nol8io/quic-go/internal/protocol"
+	"github.com/nol8io/quic-go/internal/qerr"
 
 	"github.com/stretchr/testify/require"
 )
@@ -20,6 +21,15 @@ func getSealerAndOpener(t *testing.T, cs cipherSuite, v protocol.Version) (LongH
 	aead := createAEAD(cs, trafficSecret, v)
 	return newLongHeaderSealer(aead, newHeaderProtector(cs, hpKey, true, v)),
 		newLongHeaderOpener(aead, newHeaderProtector(cs, hpKey, true, v))
+}
+
+func TestLongHeaderAEADLimitReached(t *testing.T) {
+	_, opener := getSealerAndOpener(t, getCipherSuite(tls.TLS_AES_128_GCM_SHA256), protocol.Version1)
+	opener.(*longHeaderOpener).invalidPackets = protocol.InvalidPacketLimitLongHeader - 2
+	_, err := opener.Open(nil, []byte("foobar"), 1, []byte("ad"))
+	require.ErrorIs(t, err, ErrDecryptionFailed)
+	_, err = opener.Open(nil, []byte("foobar"), 2, []byte("ad"))
+	require.ErrorIs(t, err, &qerr.TransportError{ErrorCode: qerr.AEADLimitReached})
 }
 
 func TestEncryptAndDecryptMessage(t *testing.T) {
@@ -46,23 +56,6 @@ func TestEncryptAndDecryptMessage(t *testing.T) {
 			})
 		}
 	}
-}
-
-func TestDecodePacketNumber(t *testing.T) {
-	msg := []byte("Lorem ipsum dolor sit amet")
-	ad := []byte("Donec in velit neque.")
-
-	sealer, opener := getSealerAndOpener(t, getCipherSuite(tls.TLS_AES_128_GCM_SHA256), protocol.Version1)
-	encrypted := sealer.Seal(nil, msg, 0x1337, ad)
-
-	// can't decode the packet number if encryption failed
-	_, err := opener.Open(nil, encrypted[:len(encrypted)-1], 0x1337, ad)
-	require.Error(t, err)
-	require.Equal(t, protocol.PacketNumber(0x38), opener.DecodePacketNumber(0x38, protocol.PacketNumberLen1))
-
-	_, err = opener.Open(nil, encrypted, 0x1337, ad)
-	require.NoError(t, err)
-	require.Equal(t, protocol.PacketNumber(0x1338), opener.DecodePacketNumber(0x38, protocol.PacketNumberLen1))
 }
 
 func TestEncryptAndDecryptHeader(t *testing.T) {

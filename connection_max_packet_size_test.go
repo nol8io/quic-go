@@ -70,7 +70,7 @@ func TestMaxPacketSizeConnMaxMTU(t *testing.T) {
 	for _, c := range maxPacketSizeConnCases() {
 		t.Run(c.name, func(t *testing.T) {
 			tc := newClientTestConnection(t, nil, &Config{MaxPacketSize: c.maxPacketSize}, false)
-			tc.conn.peerParams = c.peerParams()
+			tc.conn.peerParams.Store(c.peerParams())
 
 			// MPS-5: the local limit is the connection config's maxUDPPayloadSize().
 			require.Equal(t, protocol.ByteCount(c.wantLocal), tc.conn.config.maxUDPPayloadSize(), "local limit")
@@ -92,13 +92,13 @@ func TestMaxPacketSizeConnLimits(t *testing.T) {
 			}
 
 			// MPS-6: setting peerParams without applying them leaves the result unchanged.
-			tc.conn.peerParams = c.peerParams()
+			tc.conn.peerParams.Store(c.peerParams())
 			require.Equal(t, [3]int64{c.wantLocal, 0, c.wantLocal}, limits(), "peerParams set, not applied")
 
 			// MPS-6: once applied, the peer value is reported. In the "peer
 			// unknown" cases there is nothing to apply and the want values are
 			// (local, 0, local).
-			if tc.conn.peerParams != nil {
+			if tc.conn.peerParams.Load() != nil {
 				tc.conn.applyTransportParameters()
 			}
 			require.Equal(t, [3]int64{c.wantLocal, c.wantPeer, c.wantEffective}, limits(), "after apply")
