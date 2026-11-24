@@ -85,11 +85,11 @@ func newTestResponseWriter(t *testing.T) *testResponseWriter {
 	str.EXPECT().SetReadDeadline(gomock.Any()).Return(nil).AnyTimes()
 	str.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil).AnyTimes()
 	clientConn, _ := newConnPair(t)
-	conn := newRawConn(clientConn, false, nil, nopControlStrHandler, &eventRecorder, nil)
+	conn := newRawConn(clientConn, false, 0, nil, nopControlStrHandler, &eventRecorder, nil)
 	rw := newResponseWriter(
-		newStream(str, conn, nil, func(io.Reader, *headersFrame) error { return nil }, &eventRecorder),
+		newServerStream(str, conn, &eventRecorder),
 		nil,
-		false,
+		http.MethodGet,
 		slog.Default(),
 	)
 	return &testResponseWriter{
@@ -130,6 +130,19 @@ func TestResponseWriterHeader(t *testing.T) {
 	require.Equal(t, []byte("foobar"), rw.DecodeBody(t))
 }
 
+func TestResponseWriterConnectionSpecificHeaders(t *testing.T) {
+	rw := newTestResponseWriter(t)
+	for _, name := range []string{"Connection", "Keep-Alive", "Proxy-Connection", "Transfer-Encoding", "Upgrade"} {
+		rw.Header().Set(name, "foo")
+	}
+	rw.Header().Set("Te", "trailers") // TE is only allowed in request headers
+	rw.Header().Set("Invalid", "foo\r\nbar")
+	rw.Header().Set("Date", "today")
+	rw.WriteHeader(http.StatusOK)
+
+	require.Equal(t, map[string][]string{":status": {"200"}, "date": {"today"}}, rw.DecodeHeaders(t, 0))
+}
+
 func TestResponseWriterDataWithoutHeader(t *testing.T) {
 	rw := newTestResponseWriter(t)
 	rw.Write([]byte("foobar"))
@@ -158,10 +171,9 @@ func TestResponseWriterHTTPStream(t *testing.T) {
 		rw := newTestResponseWriter(t)
 		rw.Header().Set("Capsule-Protocol", "?1")
 		rw.WriteHeader(http.StatusOK)
-		str, err := rw.HTTPStream()
-		require.NoError(t, err)
-		require.PanicsWithValue(t, "http3: WriteHeader called after HTTPStream", func() { rw.WriteHeader(http.StatusOK) })
-		_, err = str.Write([]byte("foobar"))
+		require.NoError(t, rw.FlushError())
+		str := rw.HTTPStream()
+		_, err := str.Write([]byte("foobar"))
 		require.NoError(t, err)
 		n, err := rw.Write([]byte("raboof"))
 		require.ErrorIs(t, err, http.ErrHijacked)
@@ -173,13 +185,11 @@ func TestResponseWriterHTTPStream(t *testing.T) {
 		require.Equal(t, []byte("foobar"), rw.DecodeBody(t))
 	})
 
-	t.Run("without WriteHeader", func(t *testing.T) {
+	t.Run("before sending the response header", func(t *testing.T) {
 		rw := newTestResponseWriter(t)
-		str, err := rw.HTTPStream()
-		require.NoError(t, err)
-		require.Zero(t, rw.buf.Len())
-		require.PanicsWithValue(t, "http3: WriteHeader called after HTTPStream", func() { rw.WriteHeader(http.StatusOK) })
-		_, err = str.Write([]byte("foobar"))
+		str := rw.HTTPStream()
+		rw.WriteHeader(http.StatusOK)
+		_, err := str.Write([]byte("foobar"))
 		require.EqualError(t, err, "http3: invalid use of Stream.Write before sending the response header")
 		require.EqualError(t,
 			str.TryWriteAll([]byte("foobar")),
@@ -188,6 +198,12 @@ func TestResponseWriterHTTPStream(t *testing.T) {
 		_, err = rw.Write([]byte("foobar"))
 		require.ErrorIs(t, err, http.ErrHijacked)
 		require.Zero(t, rw.buf.Len())
+
+		require.NoError(t, rw.FlushError())
+		_, err = str.Write([]byte("foobar"))
+		require.NoError(t, err)
+		require.Equal(t, []string{"200"}, rw.DecodeHeaders(t, 0)[":status"])
+		require.Equal(t, []byte("foobar"), rw.DecodeBody(t))
 	})
 
 	t.Run("after an informational response", func(t *testing.T) {
@@ -195,46 +211,22 @@ func TestResponseWriterHTTPStream(t *testing.T) {
 		rw.WriteHeader(http.StatusEarlyHints)
 		l := rw.buf.Len()
 		require.NotZero(t, l)
-		str, err := rw.HTTPStream()
-		require.NoError(t, err)
-		_, err = str.Write([]byte("foobar"))
+		str := rw.HTTPStream()
+		_, err := str.Write([]byte("foobar"))
 		require.EqualError(t, err, "http3: invalid use of Stream.Write before sending the response header")
 		require.Equal(t, l, rw.buf.Len())
 	})
 
 	t.Run("after writing the response body", func(t *testing.T) {
+		const msg = "http3: HTTPStream called after writing the response body"
 		rw := newTestResponseWriter(t)
 		rw.Write([]byte("foobar"))
 		// the DATA frame is queued
-		_, err := rw.HTTPStream()
-		require.EqualError(t, err, "http3: invalid use of HTTPStream after writing the response body")
+		require.PanicsWithValue(t, msg, func() { rw.HTTPStream() })
 		// the DATA frame was sent
 		rw.Flush()
-		_, err = rw.HTTPStream()
-		require.EqualError(t, err, "http3: invalid use of HTTPStream after writing the response body")
+		require.PanicsWithValue(t, msg, func() { rw.HTTPStream() })
 		require.False(t, rw.wasStreamHijacked())
-	})
-
-	t.Run("retry after a failed write", func(t *testing.T) {
-		mockCtrl := gomock.NewController(t)
-		qstr := NewMockDatagramStream(mockCtrl)
-		qstr.EXPECT().StreamID().Return(quic.StreamID(42)).AnyTimes()
-		gomock.InOrder(
-			qstr.EXPECT().Write(gomock.Any()).Return(0, os.ErrDeadlineExceeded),
-			qstr.EXPECT().Write(gomock.Any()).DoAndReturn(func(b []byte) (int, error) { return len(b), nil }),
-		)
-		rw := newResponseWriter(newStream(qstr, nil, nil, nil, nil), nil, false, nil)
-		rw.WriteHeader(http.StatusOK)
-
-		str, err := rw.HTTPStream()
-		require.ErrorIs(t, err, os.ErrDeadlineExceeded)
-		require.Nil(t, str)
-		require.False(t, rw.wasStreamHijacked())
-
-		str, err = rw.HTTPStream()
-		require.NoError(t, err)
-		require.NotNil(t, str)
-		require.True(t, rw.wasStreamHijacked())
 	})
 }
 
@@ -251,14 +243,17 @@ func TestResponseWriterHeaderRetry(t *testing.T) {
 		}),
 		qstr.EXPECT().Write(gomock.Any()).DoAndReturn(buf.Write).AnyTimes(),
 	)
-	rw := newResponseWriter(newStream(qstr, nil, nil, nil, nil), nil, false, nil)
+	str := newServerStream(qstr, nil, nil)
+	rw := newResponseWriter(str, nil, http.MethodGet, nil)
 	rw.Header().Set("Foo", "bar")
 	rw.WriteHeader(http.StatusOK)
 
 	require.ErrorIs(t, rw.FlushError(), os.ErrDeadlineExceeded)
+	_, err := str.Write([]byte("foobar"))
+	require.EqualError(t, err, "http3: invalid use of Stream.Write before sending the response header")
 	// retry, as an application would after extending the write deadline
 	require.NoError(t, rw.FlushError())
-	_, err := rw.Write([]byte("foobar"))
+	_, err = rw.Write([]byte("foobar"))
 	require.NoError(t, err)
 
 	fields := decodeHeader(t, &buf)
@@ -278,7 +273,7 @@ func TestResponseWriterDataRetry(t *testing.T) {
 		return 1, os.ErrDeadlineExceeded
 	})
 	qstr.EXPECT().Write(gomock.Any()).DoAndReturn(buf.Write).AnyTimes()
-	rw := newResponseWriter(newStream(qstr, nil, nil, nil, nil), nil, false, nil)
+	rw := newResponseWriter(newStream(qstr, nil, nil, nil), nil, http.MethodGet, nil)
 	_, err := rw.Write([]byte("foo")) // buffered
 	require.NoError(t, err)
 
@@ -310,6 +305,49 @@ func TestResponseWriterContentLength(t *testing.T) {
 	require.Equal(t, []byte("foobar"), rw.DecodeBody(t))
 }
 
+func TestResponseWriterContentLengthZero(t *testing.T) {
+	rw := newTestResponseWriter(t)
+	rw.Header().Set("Content-Length", "0")
+	n, err := rw.Write([]byte("foobar"))
+	require.Zero(t, n)
+	require.ErrorIs(t, err, http.ErrContentLength)
+	require.NoError(t, rw.Finish())
+
+	fields := rw.DecodeHeaders(t, 0)
+	require.Equal(t, []string{"200"}, fields[":status"])
+	require.Equal(t, []string{"0"}, fields["content-length"])
+	require.Empty(t, rw.DecodeBody(t))
+}
+
+func TestResponseWriterConnect(t *testing.T) {
+	var buf bytes.Buffer
+	mockCtrl := gomock.NewController(t)
+	qstr := NewMockDatagramStream(mockCtrl)
+	qstr.EXPECT().StreamID().Return(quic.StreamID(42)).AnyTimes()
+	qstr.EXPECT().Write(gomock.Any()).DoAndReturn(buf.Write).AnyTimes()
+	rw := newResponseWriter(newStream(qstr, nil, nil, nil), nil, http.MethodConnect, nil)
+	rw.Header().Set(http.TrailerPrefix+"Foo", "bar")
+	_, err := rw.Write([]byte("foobar"))
+	require.NoError(t, err)
+	require.NoError(t, rw.Finish())
+	rw.flushTrailers()
+
+	fields := decodeHeader(t, &buf)
+	require.Equal(t, []string{"200"}, fields[":status"])
+	require.NotContains(t, fields, "content-length")
+	// a 2xx response starts a tunnel, so no trailers follow the body
+	require.Equal(t, getDataFrame([]byte("foobar")), buf.Next(buf.Len()))
+
+	// a non-2xx response doesn't start a tunnel, so trailers are sent
+	rw = newResponseWriter(newStream(qstr, nil, nil, nil), nil, http.MethodConnect, nil)
+	rw.Header().Set(http.TrailerPrefix+"Foo", "bar")
+	rw.WriteHeader(http.StatusNotFound)
+	require.NoError(t, rw.Finish())
+	rw.flushTrailers()
+	require.Equal(t, []string{"404"}, decodeHeader(t, &buf)[":status"])
+	require.Equal(t, []string{"bar"}, decodeHeader(t, &buf)["foo"])
+}
+
 func TestResponseWriterContentLengthRetry(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	qstr := NewMockDatagramStream(mockCtrl)
@@ -319,7 +357,7 @@ func TestResponseWriterContentLengthRetry(t *testing.T) {
 		qstr.EXPECT().Write(gomock.Any()).Return(0, os.ErrDeadlineExceeded),
 		qstr.EXPECT().Write(gomock.Any()).DoAndReturn(io.Discard.Write).AnyTimes(),
 	)
-	rw := newResponseWriter(newStream(qstr, nil, nil, nil, nil), nil, false, nil)
+	rw := newResponseWriter(newStream(qstr, nil, nil, nil), nil, http.MethodGet, nil)
 	rw.Header().Set("Content-Length", strconv.Itoa(maxSmallResponseSize))
 
 	data := make([]byte, maxSmallResponseSize)
@@ -396,14 +434,14 @@ func TestResponseWriterEarlyHints(t *testing.T) {
 func TestResponseWriterTrailers(t *testing.T) {
 	rw := newTestResponseWriter(t)
 
-	rw.Header().Add("Trailer", "key, Content-Length") // Content-Length is not a valid trailer
+	rw.Header().Add("Trailer", "key, Content-Length, Upgrade") // Content-Length and Upgrade are not valid trailers
 	n, err := rw.Write([]byte("foobar"))
 	require.Equal(t, 6, n)
 	require.NoError(t, err)
 
 	// writeTrailers needs to be called after writing the full body
 	headers := rw.DecodeHeaders(t, 0)
-	require.Equal(t, []string{"key, Content-Length"}, headers["trailer"])
+	require.Equal(t, []string{"key, Content-Length, Upgrade"}, headers["trailer"])
 	require.NotContains(t, headers, "foo")
 	require.Equal(t, []byte("foobar"), rw.DecodeBody(t))
 
@@ -412,6 +450,7 @@ func TestResponseWriterTrailers(t *testing.T) {
 	rw.Header().Set("foo", "bar")                        // this trailer was not announced, and will therefore be ignored
 	rw.Header().Set(http.TrailerPrefix+"lorem", "ipsum") // unannounced trailer with trailer prefix
 	rw.Header().Set("Content-Length", "999")             // invalid trailer, will be ignored
+	rw.Header().Set("Upgrade", "foo")                    // connection-specific field, will be ignored
 	require.NoError(t, rw.writeTrailers())
 
 	trailers := rw.DecodeHeaders(t, 2)
@@ -421,4 +460,5 @@ func TestResponseWriterTrailers(t *testing.T) {
 	require.NotContains(t, trailers, "foo")
 	// invalid trailers are ignored
 	require.NotContains(t, trailers, "content-length")
+	require.NotContains(t, trailers, "upgrade")
 }

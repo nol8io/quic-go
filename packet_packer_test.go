@@ -14,6 +14,7 @@ import (
 	"github.com/nol8io/quic-go/internal/monotime"
 	"github.com/nol8io/quic-go/internal/protocol"
 	"github.com/nol8io/quic-go/internal/qerr"
+	"github.com/nol8io/quic-go/internal/udp"
 	"github.com/nol8io/quic-go/internal/utils"
 	"github.com/nol8io/quic-go/internal/wire"
 	"github.com/nol8io/quic-go/qlog"
@@ -28,8 +29,7 @@ const testPackerConnIDLen = 4
 
 type testPacketPacker struct {
 	packer              *packetPacker
-	initialStream       *initialCryptoStream
-	handshakeStream     *cryptoStream
+	cryptoStreamManager *cryptoStreamManager
 	datagramQueue       *datagramQueue
 	pnManager           *mockackhandler.MockSentPacketHandler
 	sealingManager      *MockSealingManager
@@ -42,8 +42,7 @@ type testPacketPacker struct {
 func newTestPacketPacker(t *testing.T, mockCtrl *gomock.Controller, pers protocol.Perspective) *testPacketPacker {
 	destConnID := protocol.ParseConnectionID([]byte{1, 2, 3, 4})
 	require.Equal(t, testPackerConnIDLen, destConnID.Len())
-	initialStream := newInitialCryptoStream(pers == protocol.PerspectiveClient)
-	handshakeStream := newCryptoStream()
+	cryptoStreamManager := newCryptoStreamManager(pers)
 	pnManager := mockackhandler.NewMockSentPacketHandler(mockCtrl)
 	framer := NewMockFrameSource(mockCtrl)
 	ackFramer := NewMockAckFrameSource(mockCtrl)
@@ -53,8 +52,7 @@ func newTestPacketPacker(t *testing.T, mockCtrl *gomock.Controller, pers protoco
 	retransmissionQueue := newRetransmissionQueue()
 	return &testPacketPacker{
 		pnManager:           pnManager,
-		initialStream:       initialStream,
-		handshakeStream:     handshakeStream,
+		cryptoStreamManager: cryptoStreamManager,
 		sealingManager:      sealingManager,
 		framer:              framer,
 		ackFramer:           ackFramer,
@@ -64,8 +62,7 @@ func newTestPacketPacker(t *testing.T, mockCtrl *gomock.Controller, pers protoco
 		packer: newPacketPacker(
 			protocol.ParseConnectionID([]byte{1, 2, 3, 4, 5, 6, 7, 8}),
 			func() protocol.ConnectionID { return destConnID },
-			initialStream,
-			handshakeStream,
+			cryptoStreamManager,
 			pnManager,
 			retransmissionQueue,
 			sealingManager,
@@ -202,8 +199,8 @@ func testPackLongHeaders(t *testing.T, includeACK bool) {
 	}
 	clientHello, err := getClientHello("quic-go.net")
 	require.NoError(t, err)
-	tp.initialStream.Write(clientHello)
-	tp.initialStream.Write(make([]byte, 900-len(clientHello))) // add some more data
+	require.NoError(t, tp.cryptoStreamManager.Write(protocol.EncryptionInitial, clientHello))
+	require.NoError(t, tp.cryptoStreamManager.Write(protocol.EncryptionInitial, make([]byte, 900-len(clientHello)))) // add some more data
 	tp.packer.retransmissionQueue.addHandshake(&wire.PingFrame{})
 
 	p, err := tp.packer.PackCoalescedPacket(false, maxPacketSize, now, protocol.Version1)
@@ -414,7 +411,7 @@ func testPackCoalescedAppData(t *testing.T, withAck bool) {
 
 	handshakeData := make([]byte, 1000)
 	rand.Read(handshakeData)
-	tp.handshakeStream.Write(handshakeData)
+	require.NoError(t, tp.cryptoStreamManager.Write(protocol.EncryptionHandshake, handshakeData))
 	expectAppendFrames(tp.framer, nil, []ackhandler.StreamFrame{{Frame: &wire.StreamFrame{Data: []byte("foobar")}}})
 
 	p, err := tp.packer.PackCoalescedPacket(false, maxPacketSize, monotime.Now(), protocol.Version1)
@@ -609,7 +606,7 @@ func TestPack1RTTPacketNothingToSend(t *testing.T) {
 	tp.sealingManager.EXPECT().Get1RTTSealer().Return(newMockShortHeaderSealer(mockCtrl), nil)
 	tp.ackFramer.EXPECT().GetAckFrame(protocol.Encryption1RTT, gomock.Any(), true)
 	tp.framer.EXPECT().HasData()
-	_, err := tp.packer.AppendPacket(getPacketBuffer(), protocol.MaxByteCount, monotime.Now(), protocol.Version1)
+	_, err := tp.packer.AppendPacket(udp.GetPacketBuffer(), protocol.MaxByteCount, monotime.Now(), protocol.Version1)
 	require.ErrorIs(t, err, errNothingToPack)
 }
 
@@ -633,7 +630,7 @@ func TestPack1RTTPacketWithData(t *testing.T) {
 		},
 		[]ackhandler.StreamFrame{{Frame: f}},
 	)
-	buffer := getPacketBuffer()
+	buffer := udp.GetPacketBuffer()
 	buffer.Data = append(buffer.Data, []byte("foobar")...)
 	p, err := tp.packer.AppendPacket(buffer, protocol.MaxByteCount, monotime.Now(), protocol.Version1)
 	require.NoError(t, err)
@@ -668,7 +665,7 @@ func TestPack1RTTPacketWithACK(t *testing.T) {
 	tp.framer.EXPECT().HasData()
 	tp.ackFramer.EXPECT().GetAckFrame(protocol.Encryption1RTT, gomock.Any(), true).Return(ack)
 	tp.sealingManager.EXPECT().Get1RTTSealer().Return(newMockShortHeaderSealer(mockCtrl), nil)
-	p, err := tp.packer.AppendPacket(getPacketBuffer(), protocol.MaxByteCount, monotime.Now(), protocol.Version1)
+	p, err := tp.packer.AppendPacket(udp.GetPacketBuffer(), protocol.MaxByteCount, monotime.Now(), protocol.Version1)
 	require.NoError(t, err)
 	require.Equal(t, ack, p.Ack)
 }
@@ -687,7 +684,7 @@ func TestPackPathChallengeAndPathResponse(t *testing.T) {
 		{Frame: &wire.DataBlockedFrame{}},
 	}
 	expectAppendFrames(tp.framer, frames, nil)
-	buffer := getPacketBuffer()
+	buffer := udp.GetPacketBuffer()
 	p, err := tp.packer.AppendPacket(buffer, protocol.MaxByteCount, monotime.Now(), protocol.Version1)
 	require.NoError(t, err)
 	require.Len(t, p.Frames, 3)
@@ -719,12 +716,15 @@ func TestPackDatagramFrames(t *testing.T) {
 	tp.pnManager.EXPECT().PeekPacketNumber(protocol.PacketNumberSpaceAppData).Return(protocol.PacketNumber(0x42), protocol.PacketNumberLen2)
 	tp.pnManager.EXPECT().PopPacketNumber(protocol.PacketNumberSpaceAppData).Return(protocol.PacketNumber(0x42))
 	tp.sealingManager.EXPECT().Get1RTTSealer().Return(newMockShortHeaderSealer(mockCtrl), nil)
+	tp.packer.SetMaxDatagramFrameSize(5)
 	tp.datagramQueue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte("foo")})
 	tp.datagramQueue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte("bar")})
+	// larger than the peer's max_datagram_frame_size
+	tp.datagramQueue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte("foobar")})
 	tp.datagramQueue.Add(&wire.DatagramFrame{DataLenPresent: true, Data: []byte("baz")})
 	tp.framer.EXPECT().HasData().Return(true)
 	expectAppendFrames(tp.framer, []ackhandler.Frame{{Frame: &wire.MaxDataFrame{}}, {Frame: &wire.DataBlockedFrame{}}}, nil)
-	buffer := getPacketBuffer()
+	buffer := udp.GetPacketBuffer()
 	p, err := tp.packer.AppendPacket(buffer, protocol.MaxByteCount, monotime.Now(), protocol.Version1)
 	require.NoError(t, err)
 	require.Len(t, p.Frames, 5)
@@ -733,12 +733,17 @@ func TestPackDatagramFrames(t *testing.T) {
 	// the last DATAGRAM frame is the last frame in the packet, so it doesn't need a length field
 	require.Equal(t, &wire.DatagramFrame{Data: []byte("baz")}, p.Frames[4].Frame)
 	require.NotEmpty(t, buffer.Data)
-	require.Empty(t, tp.Recorder.Events(qlog.DatagramDropped{}))
+	require.Equal(t, []qlogwriter.Event{qlog.DatagramDropped{
+		Direction: qlog.DirectionSending,
+		Raw:       qlog.RawInfo{Length: 6, PayloadLength: qlog.OmitLength},
+		Trigger:   "too_large",
+	}}, tp.Recorder.Events(qlog.DatagramDropped{}))
 }
 
 func TestPackDatagramFrameFittingOnlyWithoutLength(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	tp := newTestPacketPacker(t, mockCtrl, protocol.PerspectiveServer)
+	tp.packer.SetMaxDatagramFrameSize(wire.MaxDatagramSize)
 
 	tp.ackFramer.EXPECT().GetAckFrame(protocol.Encryption1RTT, gomock.Any(), true)
 	tp.pnManager.EXPECT().PeekPacketNumber(protocol.PacketNumberSpaceAppData).Return(protocol.PacketNumber(0x42), protocol.PacketNumberLen2)
@@ -751,7 +756,7 @@ func TestPackDatagramFrameFittingOnlyWithoutLength(t *testing.T) {
 	// the DATAGRAM frame only fits if the 2 byte length field is omitted
 	hdrLen := wire.ShortHeaderLen(protocol.ParseConnectionID([]byte{1, 2, 3, 4}), protocol.PacketNumberLen2)
 	maxPacketSize := hdrLen + f.Length(protocol.Version1) - 2 + protocol.ByteCount(sealer.Overhead())
-	buffer := getPacketBuffer()
+	buffer := udp.GetPacketBuffer()
 	p, err := tp.packer.AppendPacket(buffer, maxPacketSize, monotime.Now(), protocol.Version1)
 	require.NoError(t, err)
 	require.Equal(t, []ackhandler.Frame{{Frame: &wire.DatagramFrame{Data: make([]byte, 100)}}}, p.Frames)
@@ -764,6 +769,7 @@ func TestPackLargeDatagramFrame(t *testing.T) {
 	const maxPacketSize = 1000
 	mockCtrl := gomock.NewController(t)
 	tp := newTestPacketPacker(t, mockCtrl, protocol.PerspectiveServer)
+	tp.packer.SetMaxDatagramFrameSize(wire.MaxDatagramSize)
 	tp.ackFramer.EXPECT().GetAckFrame(protocol.Encryption1RTT, gomock.Any(), true).Return(&wire.AckFrame{AckRanges: []wire.AckRange{{Largest: 100}}})
 	tp.pnManager.EXPECT().PeekPacketNumber(protocol.PacketNumberSpaceAppData).Return(protocol.PacketNumber(0x42), protocol.PacketNumberLen2)
 	tp.pnManager.EXPECT().PopPacketNumber(protocol.PacketNumberSpaceAppData).Return(protocol.PacketNumber(0x42))
@@ -771,7 +777,7 @@ func TestPackLargeDatagramFrame(t *testing.T) {
 	f := &wire.DatagramFrame{DataLenPresent: true, Data: make([]byte, maxPacketSize-10)}
 	tp.datagramQueue.Add(f)
 	tp.framer.EXPECT().HasData()
-	buffer := getPacketBuffer()
+	buffer := udp.GetPacketBuffer()
 	p, err := tp.packer.AppendPacket(buffer, maxPacketSize, monotime.Now(), protocol.Version1)
 	require.NoError(t, err)
 	require.NotNil(t, p.Ack)
@@ -787,7 +793,7 @@ func TestPackLargeDatagramFrame(t *testing.T) {
 	tp.pnManager.EXPECT().PeekPacketNumber(protocol.PacketNumberSpaceAppData).Return(protocol.PacketNumber(0x43), protocol.PacketNumberLen2)
 	tp.sealingManager.EXPECT().Get1RTTSealer().Return(newMockShortHeaderSealer(mockCtrl), nil)
 	tp.framer.EXPECT().HasData()
-	buffer = getPacketBuffer()
+	buffer = udp.GetPacketBuffer()
 	p, err = tp.packer.AppendPacket(buffer, newMaxPacketSize, monotime.Now(), protocol.Version1)
 	require.ErrorIs(t, err, errNothingToPack)
 	require.Nil(t, tp.datagramQueue.Peek()) // make sure the frame is gone
@@ -804,6 +810,7 @@ func TestPackDatagramFramesAfterControlFramesAndRetransmissions(t *testing.T) {
 	const maxPacketSize = 1000
 	mockCtrl := gomock.NewController(t)
 	tp := newTestPacketPacker(t, mockCtrl, protocol.PerspectiveServer)
+	tp.packer.SetMaxDatagramFrameSize(wire.MaxDatagramSize)
 	sealer := newMockShortHeaderSealer(mockCtrl)
 	hdrLen := wire.ShortHeaderLen(protocol.ParseConnectionID([]byte{1, 2, 3, 4}), protocol.PacketNumberLen2)
 	// this DATAGRAM frame fills an entire packet
@@ -820,7 +827,7 @@ func TestPackDatagramFramesAfterControlFramesAndRetransmissions(t *testing.T) {
 	tp.sealingManager.EXPECT().Get1RTTSealer().Return(sealer, nil)
 	tp.framer.EXPECT().HasData().Return(true)
 	expectAppendFrames(tp.framer, []ackhandler.Frame{{Frame: controlFrame}}, nil)
-	p, err := tp.packer.AppendPacket(getPacketBuffer(), maxPacketSize, monotime.Now(), protocol.Version1)
+	p, err := tp.packer.AppendPacket(udp.GetPacketBuffer(), maxPacketSize, monotime.Now(), protocol.Version1)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []wire.Frame{retransmission, controlFrame}, []wire.Frame{p.Frames[0].Frame, p.Frames[1].Frame})
 	// the DATAGRAM frame doesn't fit anymore, and is sent in the next packet
@@ -859,7 +866,7 @@ func packMaxNumNonAckElicitingAcks(t *testing.T, tp *testPacketPacker, mockCtrl 
 			&wire.AckFrame{AckRanges: []wire.AckRange{{Smallest: 1, Largest: 1}}},
 		)
 		expectAppendFrames(tp.framer, nil, nil)
-		p, err := tp.packer.AppendPacket(getPacketBuffer(), maxPacketSize, monotime.Now(), protocol.Version1)
+		p, err := tp.packer.AppendPacket(udp.GetPacketBuffer(), maxPacketSize, monotime.Now(), protocol.Version1)
 		require.NoError(t, err)
 		require.NotNil(t, p.Ack)
 		require.Empty(t, p.Frames)
@@ -880,7 +887,7 @@ func TestPackEvery20thPacketAckEliciting(t *testing.T) {
 	tp.ackFramer.EXPECT().GetAckFrame(protocol.Encryption1RTT, gomock.Any(), false)
 	tp.framer.EXPECT().HasData().Return(true)
 	expectAppendFrames(tp.framer, nil, nil)
-	_, err := tp.packer.AppendPacket(getPacketBuffer(), maxPacketSize, monotime.Now(), protocol.Version1)
+	_, err := tp.packer.AppendPacket(udp.GetPacketBuffer(), maxPacketSize, monotime.Now(), protocol.Version1)
 	require.ErrorIs(t, err, errNothingToPack)
 
 	// Now we have an ACK to send. We should bundle a PING to make the packet ack-eliciting.
@@ -892,7 +899,7 @@ func TestPackEvery20thPacketAckEliciting(t *testing.T) {
 		&wire.AckFrame{AckRanges: []wire.AckRange{{Smallest: 1, Largest: 1}}},
 	)
 	expectAppendFrames(tp.framer, nil, nil)
-	p, err := tp.packer.AppendPacket(getPacketBuffer(), maxPacketSize, monotime.Now(), protocol.Version1)
+	p, err := tp.packer.AppendPacket(udp.GetPacketBuffer(), maxPacketSize, monotime.Now(), protocol.Version1)
 	require.NoError(t, err)
 	require.Len(t, p.Frames, 1)
 	require.Equal(t, &wire.PingFrame{}, p.Frames[0].Frame)
@@ -907,7 +914,7 @@ func TestPackEvery20thPacketAckEliciting(t *testing.T) {
 		&wire.AckFrame{AckRanges: []wire.AckRange{{Smallest: 1, Largest: 1}}},
 	)
 	expectAppendFrames(tp.framer, nil, nil)
-	p, err = tp.packer.AppendPacket(getPacketBuffer(), maxPacketSize, monotime.Now(), protocol.Version1)
+	p, err = tp.packer.AppendPacket(udp.GetPacketBuffer(), maxPacketSize, monotime.Now(), protocol.Version1)
 	require.NoError(t, err)
 	require.NotNil(t, p.Ack)
 	require.Empty(t, p.Frames)
@@ -971,7 +978,7 @@ func TestPackShortHeaderPadToAtLeast4Bytes(t *testing.T) {
 	tp.ackFramer.EXPECT().GetAckFrame(protocol.Encryption1RTT, gomock.Any(), false)
 	expectAppendFrames(tp.framer, nil, []ackhandler.StreamFrame{{Frame: f}})
 
-	buffer := getPacketBuffer()
+	buffer := udp.GetPacketBuffer()
 	_, err := tp.packer.AppendPacket(buffer, protocol.MaxByteCount, monotime.Now(), protocol.Version1)
 	require.NoError(t, err)
 	// cut off the tag that the mock sealer added
@@ -1031,12 +1038,12 @@ func testPackProbePacket(t *testing.T, encLevel protocol.EncryptionLevel, perspe
 		require.NoError(t, err)
 		// The ClientHello is expected in one CRYPTO frame. nol8 (D106): scrambling
 		// is turned off here, not with QUIC_GO_DISABLE_CLIENTHELLO_SCRAMBLING.
-		tp.initialStream.scramble = false
-		tp.packer.initialStream.Write(cryptoData)
+		tp.cryptoStreamManager.initialStream.scramble = false
+		require.NoError(t, tp.cryptoStreamManager.Write(protocol.EncryptionInitial, cryptoData))
 	case protocol.EncryptionHandshake:
 		tp.sealingManager.EXPECT().GetHandshakeSealer().Return(newMockShortHeaderSealer(mockCtrl), nil)
 		cryptoData = []byte("foobar")
-		tp.packer.handshakeStream.Write(cryptoData)
+		require.NoError(t, tp.cryptoStreamManager.Write(protocol.EncryptionHandshake, cryptoData))
 	}
 	tp.ackFramer.EXPECT().GetAckFrame(encLevel, gomock.Any(), false)
 	tp.pnManager.EXPECT().PeekPacketNumber(encLevel.PacketNumberSpace()).Return(protocol.PacketNumber(0x42), protocol.PacketNumberLen2)

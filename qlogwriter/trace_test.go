@@ -77,6 +77,26 @@ func testTraceMetadata(t *testing.T,
 	require.Equal(t, RecordSeparator, data[0])
 	require.Equal(t, byte('\n'), data[len(data)-1])
 
+	// file_schema and serialization_format SHOULD be in the first 256 bytes,
+	// see https://www.ietf.org/archive/id/draft-ietf-quic-qlog-main-schema-15.html#section-3
+	dec := json.NewDecoder(bytes.NewReader(data[1:256]))
+	_, err := dec.Token() // opening brace
+	require.NoError(t, err)
+	fields := make(map[string]any)
+	for { // decoding fails at the field cut off at byte 256
+		key, err := dec.Token()
+		if err != nil {
+			break
+		}
+		var val any
+		if err := dec.Decode(&val); err != nil {
+			break
+		}
+		fields[key.(string)] = val
+	}
+	require.Equal(t, "urn:ietf:params:qlog:file:sequential", fields["file_schema"])
+	require.Equal(t, "application/qlog+json-seq", fields["serialization_format"])
+
 	commonFields := map[string]any{
 		"reference_time": map[string]any{
 			"clock_type":      "monotonic",
@@ -92,6 +112,10 @@ func testTraceMetadata(t *testing.T,
 		"vantage_point": map[string]any{
 			"type": expectedVantagePoint,
 		},
+		"implementation": map[string]any{
+			"name":    "quic-go",
+			"version": quicGoVersion,
+		},
 	}
 	if len(expectedEventSchemas) > 0 {
 		trace["event_schemas"] = expectedEventSchemas
@@ -100,7 +124,6 @@ func testTraceMetadata(t *testing.T,
 		"file_schema":          "urn:ietf:params:qlog:file:sequential",
 		"serialization_format": "application/qlog+json-seq",
 		"title":                "quic-go qlog",
-		"code_version":         quicGoVersion,
 		"qlog_format":          "JSON-SEQ",
 		"qlog_version":         "0.3",
 		"trace":                trace,

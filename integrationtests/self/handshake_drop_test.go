@@ -277,7 +277,6 @@ func TestHandshakeWithPacketLoss(t *testing.T) {
 								defer clientConn.Close()
 								serverConn := n.NewEndpoint(serverAddr, settings)
 								defer serverConn.Close()
-								require.NoError(t, n.Start())
 								defer n.Close()
 
 								var tlsConf *tls.Config
@@ -335,19 +334,25 @@ func TestHandshakePacketBuffering(t *testing.T) {
 
 		clientAddr := &net.UDPAddr{IP: net.ParseIP("1.0.0.1"), Port: 9001}
 		serverAddr := &net.UDPAddr{IP: net.ParseIP("1.0.0.2"), Port: 9002}
-		var droppedFirst atomic.Bool
+		// Drop the datagram carrying the ServerHello. Its X25519MLKEM768 key share fills the
+		// datagram, so the server sends its Handshake packets in a separate datagram.
+		// They reach the client before it can derive the Handshake keys, so it buffers them.
+		//
+		// The ClientHello spans two datagrams, so the server might send an ACK-only Initial
+		// before the ServerHello. Therefore, drop all Initials until a Handshake datagram passes.
+		var handshakeDelivered atomic.Bool
 		n := &simnet.Simnet{
 			Router: &directionAwareDroppingRouter{
 				ClientAddr: clientAddr,
 				ServerAddr: serverAddr,
 				Drop: func(d direction, p simnet.Packet) bool {
-					if droppedFirst.Load() {
+					if d != directionToClient || handshakeDelivered.Load() {
 						return false
 					}
-					if d == directionToClient && containsPacketType(p.Data, protocol.PacketTypeInitial) {
-						droppedFirst.Store(true)
+					if containsPacketType(p.Data, protocol.PacketTypeInitial) {
 						return true
 					}
+					handshakeDelivered.Store(true)
 					return false
 				},
 			},
@@ -357,7 +362,6 @@ func TestHandshakePacketBuffering(t *testing.T) {
 		defer clientConn.Close()
 		serverConn := n.NewEndpoint(serverAddr, settings)
 		defer serverConn.Close()
-		require.NoError(t, n.Start())
 		defer n.Close()
 
 		var serverEventRecorder events.Recorder

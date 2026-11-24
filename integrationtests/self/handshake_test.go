@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -16,7 +15,6 @@ import (
 	"time"
 
 	"github.com/nol8io/quic-go"
-	quicproxy "github.com/nol8io/quic-go/integrationtests/tools/proxy"
 	"github.com/nol8io/quic-go/internal/protocol"
 	"github.com/nol8io/quic-go/internal/qerr"
 	"github.com/nol8io/quic-go/internal/qtls"
@@ -73,6 +71,20 @@ func TestHandshakeAddrResolutionHelpers(t *testing.T) {
 	serverConn, err := server.Accept(ctx)
 	require.NoError(t, err)
 	defer serverConn.CloseWithError(0, "")
+
+	// ListenAddr's socket is closed once the listener is closed
+	// and the connection's closed entries have expired.
+	addr := server.Addr().(*net.UDPAddr)
+	require.NoError(t, server.Close())
+	require.NoError(t, serverConn.CloseWithError(0, ""))
+	require.Eventually(t, func() bool {
+		c, err := net.ListenUDP("udp", addr)
+		if err != nil {
+			return false
+		}
+		c.Close()
+		return true
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestHandshake(t *testing.T) {
@@ -283,185 +295,167 @@ func TestTLSConfigGetConfigForClientAddresses(t *testing.T) {
 }
 
 func TestHandshakeFailsWithoutClientCert(t *testing.T) {
-	tlsConf := getTLSConfig()
-	tlsConf.ClientAuth = tls.RequireAndVerifyClientCert
+	synctest.Test(t, func(t *testing.T) {
+		clientPacketConn, serverPacketConn, closeFn := newSimnetLink(t, 10*time.Millisecond)
+		defer closeFn(t)
 
-	server, err := quic.Listen(newUDPConnLocalhost(t), tlsConf, getQuicConfig(nil))
-	require.NoError(t, err)
-	defer server.Close()
+		tlsConf := getTLSConfig()
+		tlsConf.ClientAuth = tls.RequireAndVerifyClientCert
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	conn, err := quic.Dial(ctx, newUDPConnLocalhost(t), server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+		server, err := quic.Listen(serverPacketConn, tlsConf, getQuicConfig(nil))
+		require.NoError(t, err)
+		defer server.Close()
 
-	// Usually, the error will occur after the client already finished the handshake.
-	// However, there's a race condition here. The server's CONNECTION_CLOSE might be
-	// received before the connection is returned, so we might already get the error while dialing.
-	if err == nil {
-		errChan := make(chan error, 1)
-		go func() {
-			_, err := conn.AcceptStream(context.Background())
-			errChan <- err
-		}()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		// The client completes the handshake one RTT before the server's CONNECTION_CLOSE arrives.
+		conn, err := quic.Dial(ctx, clientPacketConn, server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+		require.NoError(t, err)
 
-		err = <-errChan
-	}
-
-	var transportErr *quic.TransportError
-	require.ErrorAs(t, err, &transportErr)
-	require.True(t, transportErr.ErrorCode.IsCryptoError())
-	require.Condition(t, func() bool {
-		errStr := transportErr.Error()
-		return strings.Contains(errStr, "tls: certificate required") ||
-			strings.Contains(errStr, "tls: bad certificate")
+		_, err = conn.AcceptStream(context.Background())
+		var transportErr *quic.TransportError
+		require.ErrorAs(t, err, &transportErr)
+		require.True(t, transportErr.ErrorCode.IsCryptoError())
+		require.Condition(t, func() bool {
+			errStr := transportErr.Error()
+			return strings.Contains(errStr, "tls: certificate required") ||
+				strings.Contains(errStr, "tls: bad certificate")
+		})
 	})
 }
 
 func TestClosedConnectionsInAcceptQueue(t *testing.T) {
-	dialer := &quic.Transport{Conn: newUDPConnLocalhost(t)}
-	defer dialer.Close()
+	synctest.Test(t, func(t *testing.T) {
+		clientPacketConn, serverPacketConn, closeFn := newSimnetLink(t, 0)
+		defer closeFn(t)
 
-	server, err := quic.Listen(newUDPConnLocalhost(t), getTLSConfig(), getQuicConfig(nil))
-	require.NoError(t, err)
-	defer server.Close()
+		dialer := &quic.Transport{Conn: clientPacketConn}
+		defer dialer.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	// Create first connection
-	conn1, err := dialer.Dial(ctx, server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
-	require.NoError(t, err)
-	conn2, err := dialer.Dial(ctx, server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
-	require.NoError(t, err)
-	defer conn2.CloseWithError(0, "")
-	// close the first connection
-	const appErrCode quic.ApplicationErrorCode = 12345
-	require.NoError(t, conn1.CloseWithError(appErrCode, ""))
-
-	time.Sleep(scaleDuration(25 * time.Millisecond)) // wait for connections to be queued and closed
-
-	// accept all connections, and find the closed one
-	var closedConn *quic.Conn
-	for range 2 {
-		conn, err := server.Accept(ctx)
+		server, err := quic.Listen(serverPacketConn, getTLSConfig(), getQuicConfig(nil))
 		require.NoError(t, err)
-		if conn.Context().Err() != nil {
-			require.Nil(t, closedConn, "only expected a single closed connection")
-			closedConn = conn
-		}
-	}
-	require.NotNil(t, closedConn, "expected one closed connection")
+		defer server.Close()
 
-	_, err = closedConn.AcceptStream(context.Background())
-	var appErr *quic.ApplicationError
-	require.ErrorAs(t, err, &appErr)
-	require.Equal(t, appErrCode, appErr.ErrorCode)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		// Create first connection
+		conn1, err := dialer.Dial(ctx, server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+		require.NoError(t, err)
+		conn2, err := dialer.Dial(ctx, server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+		require.NoError(t, err)
+		defer conn2.CloseWithError(0, "")
+		// close the first connection
+		const appErrCode quic.ApplicationErrorCode = 12345
+		require.NoError(t, conn1.CloseWithError(appErrCode, ""))
+
+		synctest.Wait() // wait for connections to be queued and closed
+
+		// accept all connections, and find the closed one
+		var closedConn *quic.Conn
+		for range 2 {
+			conn, err := server.Accept(ctx)
+			require.NoError(t, err)
+			if conn.Context().Err() != nil {
+				require.Nil(t, closedConn, "only expected a single closed connection")
+				closedConn = conn
+			}
+		}
+		require.NotNil(t, closedConn, "expected one closed connection")
+
+		_, err = closedConn.AcceptStream(context.Background())
+		var appErr *quic.ApplicationError
+		require.ErrorAs(t, err, &appErr)
+		require.Equal(t, appErrCode, appErr.ErrorCode)
+	})
 }
 
 func TestServerAcceptQueueOverflow(t *testing.T) {
-	server, err := quic.Listen(newUDPConnLocalhost(t), getTLSConfig(), getQuicConfig(nil))
-	require.NoError(t, err)
-	defer server.Close()
+	synctest.Test(t, func(t *testing.T) {
+		clientPacketConn, serverPacketConn, closeFn := newSimnetLink(t, 0)
+		defer closeFn(t)
 
-	dialer := &quic.Transport{Conn: newUDPConnLocalhost(t)}
-	defer dialer.Close()
+		tr := &quic.Transport{Conn: serverPacketConn}
+		defer tr.Close()
+		server, err := tr.Listen(getTLSConfig(), getQuicConfig(nil))
+		require.NoError(t, err)
+		defer server.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	// fill up the accept queue
-	for range protocol.MaxAcceptQueueSize {
+		dialer := &quic.Transport{Conn: clientPacketConn}
+		defer dialer.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		// fill up the accept queue
+		for range protocol.MaxAcceptQueueSize {
+			conn, err := dialer.Dial(ctx, server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+			require.NoError(t, err)
+			defer conn.CloseWithError(0, "")
+		}
+		synctest.Wait() // wait for connections to be queued
+
+		// next connection should be rejected
 		conn, err := dialer.Dial(ctx, server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
 		require.NoError(t, err)
-		defer conn.CloseWithError(0, "")
-	}
-	time.Sleep(scaleDuration(25 * time.Millisecond)) // wait for connections to be queued
+		_, err = conn.AcceptStream(ctx)
+		var transportErr *quic.TransportError
+		require.ErrorAs(t, err, &transportErr)
+		require.Equal(t, quic.ConnectionRefused, transportErr.ErrorCode)
 
-	// next connection should be rejected
-	conn, err := dialer.Dial(ctx, server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
-	require.NoError(t, err)
-	_, err = conn.AcceptStream(ctx)
-	var transportErr *quic.TransportError
-	require.ErrorAs(t, err, &transportErr)
-	require.Equal(t, quic.ConnectionRefused, transportErr.ErrorCode)
+		// accept one connection to free up a spot
+		_, err = server.Accept(ctx)
+		require.NoError(t, err)
 
-	// accept one connection to free up a spot
-	_, err = server.Accept(ctx)
-	require.NoError(t, err)
+		// should be able to dial again
+		conn2, err := dialer.Dial(ctx, server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+		require.NoError(t, err)
+		defer conn2.CloseWithError(0, "")
+		synctest.Wait()
 
-	// should be able to dial again
-	conn2, err := dialer.Dial(ctx, server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
-	require.NoError(t, err)
-	defer conn2.CloseWithError(0, "")
-	time.Sleep(scaleDuration(25 * time.Millisecond))
-
-	// but next connection should be rejected again
-	conn3, err := dialer.Dial(ctx, server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
-	require.NoError(t, err)
-	_, err = conn3.AcceptStream(ctx)
-	require.ErrorAs(t, err, &transportErr)
-	require.Equal(t, quic.ConnectionRefused, transportErr.ErrorCode)
+		// but next connection should be rejected again
+		conn3, err := dialer.Dial(ctx, server.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+		require.NoError(t, err)
+		_, err = conn3.AcceptStream(ctx)
+		require.ErrorAs(t, err, &transportErr)
+		require.Equal(t, quic.ConnectionRefused, transportErr.ErrorCode)
+	})
 }
 
 func TestHandshakeCloseListener(t *testing.T) {
 	t.Run("using Transport.Listen", func(t *testing.T) {
-		testHandshakeCloseListener(t, func(tlsConf *tls.Config) *quic.Listener {
-			tr := &quic.Transport{Conn: newUDPConnLocalhost(t)}
-			addTracer(tr)
-			t.Cleanup(func() { tr.Close() })
+		synctest.Test(t, func(t *testing.T) {
+			n := newTestNetwork(t)
+			testHandshakeCloseListener(t, n, func(tlsConf *tls.Config) *quic.Listener {
+				tr := &quic.Transport{Conn: n.NewConn()}
+				addTracer(tr)
+				t.Cleanup(func() { tr.Close() })
 
-			ln, err := tr.Listen(tlsConf, getQuicConfig(nil))
-			require.NoError(t, err)
-			return ln
+				ln, err := tr.Listen(tlsConf, getQuicConfig(nil))
+				require.NoError(t, err)
+				return ln
+			})
 		})
 	})
 
 	t.Run("using Listen", func(t *testing.T) {
-		conn := newUDPConnLocalhost(t)
-		testHandshakeCloseListener(t, func(tlsConf *tls.Config) *quic.Listener {
-			ln, err := quic.Listen(conn, tlsConf, getQuicConfig(nil))
-			require.NoError(t, err)
-			return ln
-		})
-
-		// make sure that the Transport didn't close the underlying connection
-		conn2 := newUDPConnLocalhost(t)
-		_, err := conn2.WriteTo([]byte("test"), conn2.LocalAddr())
-		require.NoError(t, err)
-
-		conn2.SetReadDeadline(time.Now().Add(time.Second))
-		b := make([]byte, 1000)
-		n, err := conn2.Read(b)
-		require.NoError(t, err)
-		require.Equal(t, "test", string(b[:n]))
-	})
-
-	// This test is somewhat slow (600ms), since the connection entries are kept for 3 PTOs.
-	t.Run("using ListenAddr", func(t *testing.T) {
-		var lnAddr *net.UDPAddr
-		testHandshakeCloseListener(t, func(tlsConf *tls.Config) *quic.Listener {
-			ln, err := quic.ListenAddr("127.0.0.1:0", tlsConf, getQuicConfig(nil))
-			require.NoError(t, err)
-			lnAddr = ln.Addr().(*net.UDPAddr)
-			return ln
-		})
-
-		// make sure that the Transport closed the underlying connection
-		if runtime.GOOS != "windows" { // this check doesn't work on Windows
-			require.Eventually(t, func() bool {
-				conn, err := net.DialUDP("udp", nil, lnAddr)
+		synctest.Test(t, func(t *testing.T) {
+			n := newTestNetwork(t)
+			conn := n.NewConn()
+			testHandshakeCloseListener(t, n, func(tlsConf *tls.Config) *quic.Listener {
+				ln, err := quic.Listen(conn, tlsConf, getQuicConfig(nil))
 				require.NoError(t, err)
-				defer conn.Close()
-				_, err = conn.Write([]byte("test"))
-				require.NoError(t, err)
-				conn.SetReadDeadline(time.Now().Add(scaleDuration(10 * time.Millisecond)))
-				_, err = conn.Read(make([]byte, 1000))
-				require.Error(t, err)
-				return strings.Contains(err.Error(), "read: connection refused")
+				return ln
+			})
+
+			// make sure that the Transport doesn't close the underlying connection
+			require.Never(t, func() bool {
+				_, err := conn.WriteTo([]byte("test"), conn.LocalAddr())
+				return err != nil
 			}, time.Second, 50*time.Millisecond)
-		}
+		})
 	})
 }
 
-func testHandshakeCloseListener(t *testing.T, createListener func(*tls.Config) *quic.Listener) {
+func testHandshakeCloseListener(t *testing.T, n *testNetwork, createListener func(*tls.Config) *quic.Listener) {
 	connQueued := make(chan struct{})
 	var sawFirst atomic.Bool
 	tlsConf := &tls.Config{
@@ -483,17 +477,18 @@ func testHandshakeCloseListener(t *testing.T, createListener func(*tls.Config) *
 	// dial the first connection
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	conn, err := quic.Dial(ctx, newUDPConnLocalhost(t), ln.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+	conn, err := quic.Dial(ctx, n.NewConn(), ln.Addr(), getTLSClientConfig(), getQuicConfig(nil))
 	require.NoError(t, err)
 	defer conn.CloseWithError(0, "")
-	_, err = ln.Accept(ctx)
+	sconn, err := ln.Accept(ctx)
 	require.NoError(t, err)
+	defer sconn.CloseWithError(0, "")
 
 	errChan := make(chan error, 1)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, err := quic.Dial(ctx, newUDPConnLocalhost(t), ln.Addr(), getTLSClientConfig(), getQuicConfig(nil))
+		_, err := quic.Dial(ctx, n.NewConn(), ln.Addr(), getTLSClientConfig(), getQuicConfig(nil))
 		errChan <- err
 	}()
 
@@ -567,25 +562,25 @@ func TestALPN(t *testing.T) {
 
 func TestTokensFromNewTokenFrames(t *testing.T) {
 	t.Run("MaxTokenAge: 1 hour", func(t *testing.T) {
-		testTokensFromNewTokenFrames(t, 0, true)
+		synctest.Test(t, func(t *testing.T) { testTokensFromNewTokenFrames(t, newTestNetwork(t), time.Hour, true) })
 	})
 	// If unset, the default value is 24h.
 	t.Run("MaxTokenAge: default", func(t *testing.T) {
-		testTokensFromNewTokenFrames(t, 0, true)
+		synctest.Test(t, func(t *testing.T) { testTokensFromNewTokenFrames(t, newTestNetwork(t), 0, true) })
 	})
 	t.Run("MaxTokenAge: very short", func(t *testing.T) {
-		testTokensFromNewTokenFrames(t, time.Microsecond, false)
+		synctest.Test(t, func(t *testing.T) { testTokensFromNewTokenFrames(t, newTestNetwork(t), time.Microsecond, false) })
 	})
 }
 
-func testTokensFromNewTokenFrames(t *testing.T, maxTokenAge time.Duration, expectTokenUsed bool) {
+func testTokensFromNewTokenFrames(t *testing.T, n *testNetwork, maxTokenAge time.Duration, expectTokenUsed bool) {
 	addrVerifiedChan := make(chan bool, 2)
 	quicConf := getQuicConfig(nil)
 	quicConf.GetConfigForClient = func(info *quic.ClientInfo) (*quic.Config, error) {
 		addrVerifiedChan <- info.AddrVerified
 		return quicConf, nil
 	}
-	tr := &quic.Transport{Conn: newUDPConnLocalhost(t), MaxTokenAge: maxTokenAge}
+	tr := &quic.Transport{Conn: n.NewConn(), MaxTokenAge: maxTokenAge}
 	addTracer(tr)
 	defer tr.Close()
 	server, err := tr.Listen(getTLSConfig(), quicConf)
@@ -606,7 +601,7 @@ func testTokensFromNewTokenFrames(t *testing.T, maxTokenAge time.Duration, expec
 	ts := newTokenStore(gets, puts)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	conn, err := quic.Dial(ctx, newUDPConnLocalhost(t), server.Addr(), getTLSClientConfig(), getQuicConfig(&quic.Config{TokenStore: ts}))
+	conn, err := quic.Dial(ctx, n.NewConn(), server.Addr(), getTLSClientConfig(), getQuicConfig(&quic.Config{TokenStore: ts}))
 	require.NoError(t, err)
 
 	// verify token store was used
@@ -634,8 +629,8 @@ func testTokensFromNewTokenFrames(t *testing.T, maxTokenAge time.Duration, expec
 	// received a token. Close this connection.
 	require.NoError(t, conn.CloseWithError(0, ""))
 
-	time.Sleep(scaleDuration(5 * time.Millisecond))
-	conn, err = quic.Dial(ctx, newUDPConnLocalhost(t), server.Addr(), getTLSClientConfig(), getQuicConfig(&quic.Config{TokenStore: ts}))
+	time.Sleep(5 * time.Millisecond) // advance the synctest clock, so that very short tokens expire
+	conn, err = quic.Dial(ctx, n.NewConn(), server.Addr(), getTLSClientConfig(), getQuicConfig(&quic.Config{TokenStore: ts}))
 	require.NoError(t, err)
 	defer conn.CloseWithError(0, "")
 
@@ -664,39 +659,35 @@ func testTokensFromNewTokenFrames(t *testing.T, maxTokenAge time.Duration, expec
 }
 
 func TestInvalidToken(t *testing.T) {
-	const rtt = 10 * time.Millisecond
+	synctest.Test(t, func(t *testing.T) {
+		const rtt = 10 * time.Millisecond
+		clientPacketConn, serverPacketConn, closeFn := newSimnetLink(t, rtt)
+		defer closeFn(t)
 
-	// The validity period of the retry token is the handshake timeout,
-	// which is twice the handshake idle timeout.
-	// By setting the handshake timeout shorter than the RTT, the token will have
-	// expired by the time it reaches the server.
-	serverConfig := getQuicConfig(&quic.Config{HandshakeIdleTimeout: rtt / 5})
+		// The validity period of the retry token is the handshake timeout,
+		// which is twice the handshake idle timeout.
+		// By setting the handshake timeout shorter than the RTT, the token will have
+		// expired by the time it reaches the server.
+		serverConfig := getQuicConfig(&quic.Config{HandshakeIdleTimeout: rtt / 5})
 
-	tr := &quic.Transport{
-		Conn:                newUDPConnLocalhost(t),
-		VerifySourceAddress: func(net.Addr) bool { return true },
-	}
-	addTracer(tr)
-	defer tr.Close()
+		tr := &quic.Transport{
+			Conn:                serverPacketConn,
+			VerifySourceAddress: func(net.Addr) bool { return true },
+		}
+		addTracer(tr)
+		defer tr.Close()
 
-	server, err := tr.Listen(getTLSConfig(), serverConfig)
-	require.NoError(t, err)
-	defer server.Close()
+		server, err := tr.Listen(getTLSConfig(), serverConfig)
+		require.NoError(t, err)
+		defer server.Close()
 
-	proxy := quicproxy.Proxy{
-		Conn:        newUDPConnLocalhost(t),
-		ServerAddr:  server.Addr().(*net.UDPAddr),
-		DelayPacket: func(quicproxy.Direction, net.Addr, net.Addr, []byte) time.Duration { return rtt / 2 },
-	}
-	require.NoError(t, proxy.Start())
-	defer proxy.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_, err = quic.Dial(ctx, newUDPConnLocalhost(t), proxy.LocalAddr(), getTLSClientConfig(), nil)
-	var transportErr *quic.TransportError
-	require.ErrorAs(t, err, &transportErr)
-	require.Equal(t, quic.InvalidToken, transportErr.ErrorCode)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, err = quic.Dial(ctx, clientPacketConn, server.Addr(), getTLSClientConfig(), nil)
+		var transportErr *quic.TransportError
+		require.ErrorAs(t, err, &transportErr)
+		require.Equal(t, quic.InvalidToken, transportErr.ErrorCode)
+	})
 }
 
 func TestGetConfigForClient(t *testing.T) {
@@ -769,105 +760,111 @@ func TestGetConfigForClientErrorsConnectionRejection(t *testing.T) {
 }
 
 func TestNoPacketsSentWhenClientHelloFails(t *testing.T) {
-	conn := newUDPConnLocalhost(t)
+	synctest.Test(t, func(t *testing.T) {
+		n := newTestNetwork(t)
+		conn := n.NewConn()
 
-	packetChan := make(chan struct{}, 1)
-	go func() {
-		for {
-			_, _, err := conn.ReadFromUDP(make([]byte, protocol.MaxPacketBufferSize))
-			if err != nil {
-				return
+		packetChan := make(chan struct{}, 1)
+		go func() {
+			for {
+				_, _, err := conn.ReadFrom(make([]byte, protocol.MaxPacketBufferSize))
+				if err != nil {
+					return
+				}
+				select {
+				case packetChan <- struct{}{}:
+				default:
+				}
 			}
-			select {
-			case packetChan <- struct{}{}:
-			default:
-			}
+		}()
+
+		tlsConf := getTLSClientConfig()
+		tlsConf.NextProtos = []string{""}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, err := quic.Dial(ctx, n.NewConn(), conn.LocalAddr(), tlsConf, getQuicConfig(nil))
+
+		var transportErr *quic.TransportError
+		require.ErrorAs(t, err, &transportErr)
+		require.True(t, transportErr.ErrorCode.IsCryptoError())
+		require.ErrorContains(t, err, "tls: invalid NextProtos value")
+
+		// verify no packets were sent
+		select {
+		case <-packetChan:
+			t.Fatal("received unexpected packet")
+		case <-time.After(50 * time.Millisecond):
+			// no packets received, as expected
 		}
-	}()
-
-	tlsConf := getTLSClientConfig()
-	tlsConf.NextProtos = []string{""}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_, err := quic.Dial(ctx, newUDPConnLocalhost(t), conn.LocalAddr(), tlsConf, getQuicConfig(nil))
-
-	var transportErr *quic.TransportError
-	require.ErrorAs(t, err, &transportErr)
-	require.True(t, transportErr.ErrorCode.IsCryptoError())
-	require.ErrorContains(t, err, "tls: invalid NextProtos value")
-
-	// verify no packets were sent
-	select {
-	case <-packetChan:
-		t.Fatal("received unexpected packet")
-	case <-time.After(50 * time.Millisecond):
-		// no packets received, as expected
-	}
+	})
 }
 
 func TestServerTransportClose(t *testing.T) {
-	tlsServerConf := getTLSConfig()
-	tr := &quic.Transport{Conn: newUDPConnLocalhost(t)}
-	server, err := tr.Listen(tlsServerConf, getQuicConfig(nil))
-	require.NoError(t, err)
-	defer server.Close()
+	synctest.Test(t, func(t *testing.T) {
+		n := newTestNetwork(t)
+		tlsServerConf := getTLSConfig()
+		tr := &quic.Transport{Conn: n.NewConn()}
+		server, err := tr.Listen(tlsServerConf, getQuicConfig(nil))
+		require.NoError(t, err)
+		defer server.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	// the first conn is accepted by the server...
-	conn1, err := quic.Dial(
-		ctx,
-		newUDPConnLocalhost(t),
-		server.Addr(),
-		getTLSClientConfig(),
-		getQuicConfig(&quic.Config{MaxIdleTimeout: scaleDuration(50 * time.Millisecond)}),
-	)
-	require.NoError(t, err)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		// the first conn is accepted by the server...
+		conn1, err := quic.Dial(
+			ctx,
+			n.NewConn(),
+			server.Addr(),
+			getTLSClientConfig(),
+			getQuicConfig(&quic.Config{MaxIdleTimeout: 50 * time.Millisecond}),
+		)
+		require.NoError(t, err)
 
-	sconn, err := server.Accept(ctx)
-	require.NoError(t, err)
-	require.Equal(t, conn1.LocalAddr(), sconn.RemoteAddr())
+		sconn, err := server.Accept(ctx)
+		require.NoError(t, err)
+		require.Equal(t, conn1.LocalAddr(), sconn.RemoteAddr())
 
-	// ...the second conn isn't, it remains in the server's accept queue
-	conn2, err := quic.Dial(
-		ctx,
-		newUDPConnLocalhost(t),
-		server.Addr(),
-		getTLSClientConfig(),
-		getQuicConfig(&quic.Config{MaxIdleTimeout: scaleDuration(50 * time.Millisecond)}),
-	)
-	require.NoError(t, err)
+		// ...the second conn isn't, it remains in the server's accept queue
+		conn2, err := quic.Dial(
+			ctx,
+			n.NewConn(),
+			server.Addr(),
+			getTLSClientConfig(),
+			getQuicConfig(&quic.Config{MaxIdleTimeout: 50 * time.Millisecond}),
+		)
+		require.NoError(t, err)
 
-	time.Sleep(scaleDuration(10 * time.Millisecond))
+		synctest.Wait()
 
-	// closing the Transport abruptly terminates connections
-	require.NoError(t, tr.Close())
+		// closing the Transport abruptly terminates connections
+		require.NoError(t, tr.Close())
 
-	select {
-	case <-sconn.Context().Done():
-		require.ErrorIs(t, context.Cause(sconn.Context()), quic.ErrTransportClosed)
-	case <-time.After(time.Second):
-		t.Fatal("timeout")
-	}
+		select {
+		case <-sconn.Context().Done():
+			require.ErrorIs(t, context.Cause(sconn.Context()), quic.ErrTransportClosed)
+		case <-time.After(time.Second):
+			t.Fatal("timeout")
+		}
 
-	// no CONNECTION_CLOSE frame is sent to the peers
-	select {
-	case <-conn1.Context().Done():
-		require.ErrorIs(t, context.Cause(conn1.Context()), &quic.IdleTimeoutError{})
-	case <-time.After(time.Second):
-		t.Fatal("timeout")
-	}
-	select {
-	case <-conn2.Context().Done():
-		require.ErrorIs(t, context.Cause(conn1.Context()), &quic.IdleTimeoutError{})
-	case <-time.After(time.Second):
-		t.Fatal("timeout")
-	}
+		// no CONNECTION_CLOSE frame is sent to the peers
+		select {
+		case <-conn1.Context().Done():
+			require.ErrorIs(t, context.Cause(conn1.Context()), &quic.IdleTimeoutError{})
+		case <-time.After(time.Second):
+			t.Fatal("timeout")
+		}
+		select {
+		case <-conn2.Context().Done():
+			require.ErrorIs(t, context.Cause(conn2.Context()), &quic.IdleTimeoutError{})
+		case <-time.After(time.Second):
+			t.Fatal("timeout")
+		}
 
-	// Accept should error after the transport was closed
-	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	accepted, err := server.Accept(ctx)
-	require.ErrorIs(t, err, quic.ErrTransportClosed)
-	require.Nil(t, accepted)
+		// Accept should error after the transport was closed
+		ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		accepted, err := server.Accept(ctx)
+		require.ErrorIs(t, err, quic.ErrTransportClosed)
+		require.Nil(t, accepted)
+	})
 }

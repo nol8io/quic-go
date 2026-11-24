@@ -71,7 +71,6 @@ func newSimnetLink(t *testing.T, rtt time.Duration) (client, server net.PacketCo
 
 	client = n.NewEndpoint(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9001}, settings)
 	server = n.NewEndpoint(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9002}, settings)
-	require.NoError(t, n.Start())
 	return client, server, func() {
 		require.NoError(t, n.Close())
 	}
@@ -101,6 +100,8 @@ func TestTransportPacketHandling(t *testing.T) {
 	select {
 	case p := <-connChan1:
 		require.Equal(t, conn.LocalAddr(), p.remoteAddr)
+		require.NotNil(t, p.buffer)
+		require.Same(t, &p.buffer.Data[0], &p.data[0])
 		connID, err := wire.ParseConnectionID(p.data, 0)
 		require.NoError(t, err)
 		require.Equal(t, connID1, connID)
@@ -152,6 +153,61 @@ func TestTransportAndDialConcurrentClose(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timeout")
 	}
+}
+
+func TestTransportSingleUseStopsAfterLastConnRemoved(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		_, conn, closeFn := newSimnetLink(t, 10*time.Millisecond)
+		defer closeFn()
+
+		tr := &Transport{Conn: conn, isSingleUse: true}
+		defer tr.Close()
+		ln, err := tr.Listen(&tls.Config{}, nil)
+		require.NoError(t, err)
+
+		connID := protocol.ParseConnectionID([]byte{1, 2, 3, 4})
+		m := (*packetHandlerMap)(tr)
+		require.True(t, m.Add(connID, &mockPacketHandler{}))
+		require.NoError(t, ln.Close())
+		synctest.Wait()
+		select {
+		case <-tr.listening:
+			t.Fatal("stopped listening while a connection is still alive")
+		default:
+		}
+
+		m.Remove(connID)
+		synctest.Wait()
+		select {
+		case <-tr.listening:
+		default:
+			t.Fatal("still listening")
+		}
+	})
+}
+
+func TestTransportSingleUseConnClosedAfterListener(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		_, conn, closeFn := newSimnetLink(t, 10*time.Millisecond)
+		defer closeFn()
+
+		tr := &Transport{Conn: conn, isSingleUse: true}
+		ln, err := tr.Listen(&tls.Config{}, nil)
+		require.NoError(t, err)
+
+		errChan := make(chan error, 1)
+		ph := &mockPacketHandler{destruction: errChan}
+		require.True(t, (*packetHandlerMap)(tr).Add(protocol.ParseConnectionID([]byte{1, 2, 3, 4}), ph))
+		require.NoError(t, ln.Close())
+		require.NoError(t, conn.Close())
+
+		select {
+		case err := <-errChan:
+			require.ErrorIs(t, err, ErrTransportClosed)
+		case <-time.After(time.Second):
+			t.Fatal("timeout")
+		}
+	})
 }
 
 func TestTransportErrFromConn(t *testing.T) {
@@ -213,6 +269,8 @@ func TestTransportStatelessResetReceiving(t *testing.T) {
 	destroyChan := make(chan error, 1)
 	conn1 := &mockPacketHandler{destruction: destroyChan}
 	(*packetHandlerMap)(tr).AddResetToken(token, conn1)
+	// short header packets smaller than 21 bytes are never valid
+	require.False(t, tr.maybeHandleStatelessReset(append([]byte{0x40, 1, 2, 3}, token[:]...)))
 
 	conn := newUDPConnLocalhost(t)
 	_, err = conn.WriteTo(b, tr.Conn.LocalAddr())
@@ -361,6 +419,13 @@ func TestTransportListening(t *testing.T) {
 			},
 			eventRecorder.Events(qlog.PacketDropped{}),
 		)
+
+		// packets of other QUIC versions can use connection IDs longer than 20 bytes
+		packet := append([]byte{0xc0, 0, 0, 0, 0x42, 21}, make([]byte, protocol.MinUnknownVersionPacketSize)...)
+		_, err = clientConn.WriteTo(packet, tr.Conn.LocalAddr())
+		require.NoError(t, err)
+		time.Sleep(rtt) // so that the packet arrives at the server
+		require.Len(t, eventRecorder.Events(qlog.VersionNegotiationSent{}), 1)
 
 		// only a single listener can be set
 		_, err = tr.Listen(&tls.Config{}, nil)

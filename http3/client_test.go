@@ -101,7 +101,7 @@ func encodeResponse(t *testing.T, status int) []byte {
 	rstr := NewMockDatagramStream(mockCtrl)
 	rstr.EXPECT().StreamID().Return(quic.StreamID(42)).AnyTimes()
 	rstr.EXPECT().Write(gomock.Any()).DoAndReturn(buf.Write).AnyTimes()
-	rw := newResponseWriter(newStream(rstr, nil, nil, func(io.Reader, *headersFrame) error { return nil }, nil), nil, false, nil)
+	rw := newResponseWriter(newStream(rstr, nil, nil, nil), nil, http.MethodGet, nil)
 	rw.WriteHeader(status)
 	rw.Flush()
 	return buf.Bytes()
@@ -429,30 +429,46 @@ func TestClientExtendedConnectCancelBeforeSettings(t *testing.T) {
 	}
 }
 
+func TestClientRejectsDatagrams(t *testing.T) {
+	clientConn, serverConn := newConnPair(t, withDatagrams())
+	cc := (&Transport{EnableDatagrams: true}).NewClientConn(clientConn)
+	controlStr, err := serverConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = controlStr.Write((&settingsFrame{Datagram: true}).Append(quicvarint.Append(nil, streamTypeControlStream)))
+	require.NoError(t, err)
+
+	str, err := cc.OpenRequestStream(context.Background())
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodGet, "https://quic-go.net", nil)
+	require.NoError(t, err)
+	require.NoError(t, str.SendRequestHeader(req))
+	serverStr, err := serverConn.AcceptStream(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, serverConn.SendDatagram(quicvarint.Append(nil, uint64(serverStr.StreamID()/4))))
+	expectStreamWriteReset(t, serverStr, quic.StreamErrorCode(ErrCodeDatagramError))
+}
+
 func TestClient1xxHandling(t *testing.T) {
 	t.Run("a few early hints", func(t *testing.T) {
-		testClient1xxHandling(t, max1xxResponses, http.StatusOK, false)
+		testClient1xxHandling(t, max1xxResponses, false)
 	})
 	t.Run("too many early hints", func(t *testing.T) {
-		testClient1xxHandling(t, max1xxResponses+1, http.StatusOK, true)
-	})
-	t.Run("EarlyHints followed by StatusSwitchingProtocols", func(t *testing.T) {
-		testClient1xxHandling(t, 1, http.StatusSwitchingProtocols, false)
+		testClient1xxHandling(t, max1xxResponses+1, true)
 	})
 }
 
-func testClient1xxHandling(t *testing.T, numEarlyHints int, terminalStatus int, tooMany bool) {
+func testClient1xxHandling(t *testing.T, numEarlyHints int, tooMany bool) {
 	var rspBuf bytes.Buffer
 	rstr := NewMockDatagramStream(gomock.NewController(t))
 	rstr.EXPECT().StreamID().Return(quic.StreamID(42)).AnyTimes()
 	rstr.EXPECT().Write(gomock.Any()).DoAndReturn(rspBuf.Write).AnyTimes()
-	rw := newResponseWriter(newStream(rstr, nil, nil, func(io.Reader, *headersFrame) error { return nil }, nil), nil, false, nil)
+	rw := newResponseWriter(newStream(rstr, nil, nil, nil), nil, http.MethodGet, nil)
 	rw.header.Add("Link", "foo")
 	rw.header.Add("Link", "bar")
 	for range numEarlyHints {
 		rw.WriteHeader(http.StatusEarlyHints)
 	}
-	rw.WriteHeader(terminalStatus)
+	rw.WriteHeader(http.StatusOK)
 	rw.Flush()
 	rspBytes := rspBuf.Bytes()
 
@@ -495,7 +511,7 @@ func testClient1xxHandling(t *testing.T, numEarlyHints int, terminalStatus int, 
 	}
 
 	require.Equal(t, []string{"foo", "bar"}, rsp.Header["Link"])
-	require.Equal(t, terminalStatus, rsp.StatusCode)
+	require.Equal(t, http.StatusOK, rsp.StatusCode)
 }
 
 func TestClientGzip(t *testing.T) {
@@ -523,6 +539,35 @@ func TestClientGzip(t *testing.T) {
 	})
 }
 
+func TestClientConnectIgnoresContentLength(t *testing.T) {
+	var hdr bytes.Buffer
+	enc := qpack.NewEncoder(&hdr)
+	require.NoError(t, enc.WriteField(qpack.HeaderField{Name: ":status", Value: "200"}))
+	require.NoError(t, enc.WriteField(qpack.HeaderField{Name: "content-length", Value: "3"}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	clientConn, serverConn := newConnPair(t)
+	go func() {
+		str, err := serverConn.AcceptStream(ctx)
+		if err != nil {
+			return
+		}
+		str.Write(append((&headersFrame{Length: uint64(hdr.Len())}).Append(nil), hdr.Bytes()...))
+		str.Write(getDataFrame([]byte("foobar")))
+		// only DATA frames are allowed once the CONNECT method has completed
+		writeTrailers(str, http.Header{"Foo": {"bar"}}, str.StreamID(), nil)
+		str.Close()
+	}()
+
+	req := httptest.NewRequestWithContext(ctx, http.MethodConnect, "http://quic-go.net", nil)
+	rsp, err := (&Transport{}).NewClientConn(clientConn).RoundTrip(req)
+	require.NoError(t, err)
+	body, err := io.ReadAll(rsp.Body)
+	require.ErrorContains(t, err, "HEADERS frame received on a CONNECT stream")
+	require.Equal(t, []byte("foobar"), body)
+}
+
 func testClientGzip(t *testing.T,
 	data []byte,
 	expectedRsp []byte,
@@ -535,7 +580,7 @@ func testClientGzip(t *testing.T,
 	rstr := NewMockDatagramStream(gomock.NewController(t))
 	rstr.EXPECT().StreamID().Return(quic.StreamID(42)).AnyTimes()
 	rstr.EXPECT().Write(gomock.Any()).DoAndReturn(rspBuf.Write).AnyTimes()
-	rw := newResponseWriter(newStream(rstr, nil, nil, func(io.Reader, *headersFrame) error { return nil }, nil), nil, false, nil)
+	rw := newResponseWriter(newStream(rstr, nil, nil, nil), nil, http.MethodGet, nil)
 	rw.WriteHeader(status)
 	if responseAddContentEncoding {
 		rw.header.Add("Content-Encoding", "gzip")

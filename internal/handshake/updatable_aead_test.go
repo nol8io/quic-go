@@ -208,36 +208,23 @@ func TestUpdatableAEADEncryptDecryptMessage(t *testing.T) {
 }
 
 func TestUpdatableAEADPacketNumbers(t *testing.T) {
-	client, server, _ := setupEndpoints(t, utils.NewRTTStats())
+	_, server, _ := setupEndpoints(t, utils.NewRTTStats())
 	msg := []byte("Lorem ipsum")
 	ad := []byte("Donec in velit neque.")
 
-	encrypted := server.Seal(nil, msg, 0x1337, ad)
+	_ = server.Seal(nil, msg, 0x1337, ad)
 	require.Equal(t, protocol.PacketNumber(0x1337), server.FirstPacketNumber()) // make sure we save the first packet number
 	_ = server.Seal(nil, msg, 0x1338, ad)
 	require.Equal(t, protocol.PacketNumber(0x1337), server.FirstPacketNumber()) // make sure we save the first packet number
-
-	// check that decoding the packet number works as expected
-	_, err := client.Open(nil, encrypted[:len(encrypted)-1], monotime.Now(), 0x1337, protocol.KeyPhaseZero, ad)
-	require.Error(t, err)
-	require.Equal(t, protocol.PacketNumber(0x38), client.DecodePacketNumber(0x38, protocol.PacketNumberLen1))
-
-	_, err = client.Open(nil, encrypted, monotime.Now(), 0x1337, protocol.KeyPhaseZero, ad)
-	require.NoError(t, err)
-	require.Equal(t, protocol.PacketNumber(0x1338), client.DecodePacketNumber(0x38, protocol.PacketNumberLen1))
 }
 
 func TestAEADLimitReached(t *testing.T) {
 	client, _, _ := setupEndpoints(t, utils.NewRTTStats())
-	client.invalidPacketLimit = 10
-	for i := range 9 {
-		_, err := client.Open(nil, []byte("foobar"), monotime.Now(), protocol.PacketNumber(i), protocol.KeyPhaseZero, []byte("ad"))
-		require.ErrorIs(t, err, ErrDecryptionFailed)
-	}
-	_, err := client.Open(nil, []byte("foobar"), monotime.Now(), 10, protocol.KeyPhaseZero, []byte("ad"))
-	var transportErr *qerr.TransportError
-	require.ErrorAs(t, err, &transportErr)
-	require.Equal(t, qerr.AEADLimitReached, transportErr.ErrorCode)
+	client.invalidPacketCount = client.suite.IntegrityLimit() - 4*protocol.InvalidPacketLimitLongHeader - 2
+	_, err := client.Open(nil, []byte("foobar"), monotime.Now(), 1, protocol.KeyPhaseZero, []byte("ad"))
+	require.ErrorIs(t, err, ErrDecryptionFailed)
+	_, err = client.Open(nil, []byte("foobar"), monotime.Now(), 2, protocol.KeyPhaseZero, []byte("ad"))
+	require.ErrorIs(t, err, &qerr.TransportError{ErrorCode: qerr.AEADLimitReached})
 }
 
 func TestKeyUpdates(t *testing.T) {
@@ -321,6 +308,31 @@ func TestReorderedPacketAfterKeyUpdate(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, msg, string(decrypted))
 	require.Equal(t, protocol.KeyPhaseOne, server.KeyPhase())
+}
+
+func TestKeyUpdateOldKeysOnlyBelowLowestNewKeyPacket(t *testing.T) {
+	client, server, _ := setupEndpoints(t, utils.NewRTTStats())
+	now := monotime.Now()
+
+	old14 := client.Seal(nil, []byte(msg), 14, []byte(ad))
+	old17 := client.Seal(nil, []byte(msg), 17, []byte(ad))
+	client.rollKeys()
+	new15 := client.Seal(nil, []byte(msg), 15, []byte(ad))
+	new20 := client.Seal(nil, []byte(msg), 20, []byte(ad))
+
+	_, err := server.Open(nil, new20, now, 20, protocol.KeyPhaseOne, []byte(ad))
+	require.NoError(t, err)
+	// reordered: 17 is below every packet received with the new keys
+	_, err = server.Open(nil, old17, now, 17, protocol.KeyPhaseZero, []byte(ad))
+	require.NoError(t, err)
+
+	_, err = server.Open(nil, new15, now, 15, protocol.KeyPhaseOne, []byte(ad))
+	require.NoError(t, err)
+	// 15 used the new keys, so 17 can't use the old keys anymore
+	_, err = server.Open(nil, old17, now, 17, protocol.KeyPhaseZero, []byte(ad))
+	require.ErrorIs(t, err, ErrDecryptionFailed)
+	_, err = server.Open(nil, old14, now, 14, protocol.KeyPhaseZero, []byte(ad))
+	require.NoError(t, err)
 }
 
 func TestDropsKeys3PTOsAfterKeyUpdate(t *testing.T) {

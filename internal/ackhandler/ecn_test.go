@@ -2,7 +2,9 @@ package ackhandler
 
 import (
 	"testing"
+	"time"
 
+	"github.com/nol8io/quic-go/internal/monotime"
 	"github.com/nol8io/quic-go/internal/protocol"
 	"github.com/nol8io/quic-go/internal/utils"
 	"github.com/nol8io/quic-go/qlog"
@@ -29,7 +31,7 @@ func sendECNTestingPackets(t *testing.T, ecnTracker *ecnTracker, recorder *event
 		require.Equal(t, protocol.ECT0, ecnTracker.Mode())
 		// do this twice to make sure only sent packets are counted
 		require.Equal(t, protocol.ECT0, ecnTracker.Mode())
-		ecnTracker.SentPacket(i, protocol.ECT0)
+		ecnTracker.SentPacket(monotime.Now(), i, protocol.ECT0)
 	}
 	require.Equal(t,
 		[]qlogwriter.Event{qlog.ECNStateUpdated{State: qlog.ECNStateTesting}},
@@ -37,7 +39,7 @@ func sendECNTestingPackets(t *testing.T, ecnTracker *ecnTracker, recorder *event
 	)
 	require.Equal(t, protocol.ECT0, ecnTracker.Mode())
 	recorder.Clear()
-	ecnTracker.SentPacket(9, protocol.ECT0)
+	ecnTracker.SentPacket(monotime.Now(), 9, protocol.ECT0)
 	require.Equal(t,
 		[]qlogwriter.Event{qlog.ECNStateUpdated{State: qlog.ECNStateUnknown}},
 		recorder.Events(),
@@ -57,7 +59,7 @@ func TestECNTestingPacketsLoss(t *testing.T) {
 	// send non-testing packets
 	for i := range protocol.PacketNumber(10) {
 		require.Equal(t, protocol.ECNNon, ecnTracker.Mode())
-		ecnTracker.SentPacket(10+i, protocol.ECNNon)
+		ecnTracker.SentPacket(monotime.Now(), 10+i, protocol.ECNNon)
 	}
 
 	// lose all but one packet
@@ -91,7 +93,7 @@ func TestECNValidationInTestingState(t *testing.T) {
 
 	for i := range 5 {
 		require.Equal(t, protocol.ECT0, ecnTracker.Mode())
-		ecnTracker.SentPacket(protocol.PacketNumber(i), protocol.ECT0)
+		ecnTracker.SentPacket(monotime.Now(), protocol.PacketNumber(i), protocol.ECT0)
 	}
 	require.Equal(t,
 		[]qlogwriter.Event{qlog.ECNStateUpdated{State: qlog.ECNStateTesting}},
@@ -107,7 +109,7 @@ func TestECNValidationInTestingState(t *testing.T) {
 	// make sure we continue sending ECT(0) packets
 	for i := 5; i < 100; i++ {
 		require.Equal(t, protocol.ECT0, ecnTracker.Mode())
-		ecnTracker.SentPacket(protocol.PacketNumber(i), protocol.ECT0)
+		ecnTracker.SentPacket(monotime.Now(), protocol.PacketNumber(i), protocol.ECT0)
 	}
 }
 
@@ -122,7 +124,7 @@ func TestECNValidationInUnknownState(t *testing.T) {
 	for i := range protocol.PacketNumber(10) {
 		require.Equal(t, protocol.ECNNon, ecnTracker.Mode())
 		pn := 10 + i
-		ecnTracker.SentPacket(pn, protocol.ECNNon)
+		ecnTracker.SentPacket(monotime.Now(), pn, protocol.ECNNon)
 		// lose some packets to make sure this doesn't influence the outcome.
 		if i%2 == 0 {
 			ecnTracker.LostPacket(pn)
@@ -140,6 +142,10 @@ func TestECNValidationFailures(t *testing.T) {
 	t.Run("ECN bleaching", func(t *testing.T) {
 		// this ACK doesn't contain any ECN counts
 		testECNValidationFailure(t, getAckedPackets(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12), 0, 0, 0, ecnFailedNoECNCounts)
+	})
+
+	t.Run("ECN bleaching of the last testing packet", func(t *testing.T) {
+		testECNValidationFailure(t, getAckedPackets(9), 0, 0, 0, ecnFailedNoECNCounts)
 	})
 
 	t.Run("wrong ECN code point", func(t *testing.T) {
@@ -165,7 +171,7 @@ func testECNValidationFailure(
 	sendECNTestingPackets(t, ecnTracker, &eventRecorder)
 	for i := 10; i < 20; i++ {
 		require.Equal(t, protocol.ECNNon, ecnTracker.Mode())
-		ecnTracker.SentPacket(protocol.PacketNumber(i), protocol.ECNNon)
+		ecnTracker.SentPacket(monotime.Now(), protocol.PacketNumber(i), protocol.ECNNon)
 	}
 
 	require.False(t, ecnTracker.HandleNewlyAcked(ackedPackets, ect0, ect1, ecnce))
@@ -182,7 +188,7 @@ func TestECNValidationNotEnoughECNCounts(t *testing.T) {
 	sendECNTestingPackets(t, ecnTracker, &eventRecorder)
 	for i := 10; i < 20; i++ {
 		require.Equal(t, protocol.ECNNon, ecnTracker.Mode())
-		ecnTracker.SentPacket(protocol.PacketNumber(i), protocol.ECNNon)
+		ecnTracker.SentPacket(monotime.Now(), protocol.PacketNumber(i), protocol.ECNNon)
 	}
 	require.Empty(t, eventRecorder.Events())
 	// First only acknowledge some packets sent with ECN marks.
@@ -209,7 +215,7 @@ func TestECNNonsensicalECNCountDecrease(t *testing.T) {
 	sendECNTestingPackets(t, ecnTracker, &eventRecorder)
 	for i := 10; i < 20; i++ {
 		require.Equal(t, protocol.ECNNon, ecnTracker.Mode())
-		ecnTracker.SentPacket(protocol.PacketNumber(i), protocol.ECNNon)
+		ecnTracker.SentPacket(monotime.Now(), protocol.PacketNumber(i), protocol.ECNNon)
 	}
 	require.Empty(t, eventRecorder.Events())
 	require.False(t, ecnTracker.HandleNewlyAcked(getAckedPackets(1, 2, 3, 12), 3, 0, 0))
@@ -239,7 +245,7 @@ func TestECNACKReordering(t *testing.T) {
 	sendECNTestingPackets(t, ecnTracker, &eventRecorder)
 	for i := 10; i < 20; i++ {
 		require.Equal(t, protocol.ECNNon, ecnTracker.Mode())
-		ecnTracker.SentPacket(protocol.PacketNumber(i), protocol.ECNNon)
+		ecnTracker.SentPacket(monotime.Now(), protocol.PacketNumber(i), protocol.ECNNon)
 	}
 	require.Empty(t, eventRecorder.Events())
 
@@ -260,7 +266,7 @@ func TestECNManglingAllPacketsMarkedCE(t *testing.T) {
 	sendECNTestingPackets(t, ecnTracker, &eventRecorder)
 	for i := 10; i < 20; i++ {
 		require.Equal(t, protocol.ECNNon, ecnTracker.Mode())
-		ecnTracker.SentPacket(protocol.PacketNumber(i), protocol.ECNNon)
+		ecnTracker.SentPacket(monotime.Now(), protocol.PacketNumber(i), protocol.ECNNon)
 	}
 
 	// ECN capability not confirmed yet, therefore CE marks are not regarded as congestion events
@@ -293,7 +299,7 @@ func testECNManglingSomePacketsLostSomeMarkedCE(t *testing.T, packetLossFirst bo
 	sendECNTestingPackets(t, ecnTracker, &eventRecorder)
 	for i := 10; i < 20; i++ {
 		require.Equal(t, protocol.ECNNon, ecnTracker.Mode())
-		ecnTracker.SentPacket(protocol.PacketNumber(i), protocol.ECNNon)
+		ecnTracker.SentPacket(monotime.Now(), protocol.PacketNumber(i), protocol.ECNNon)
 	}
 	// Lose a few packets.
 	if packetLossFirst {
@@ -334,7 +340,7 @@ func TestECNCongestionDetection(t *testing.T) {
 	sendECNTestingPackets(t, ecnTracker, &eventRecorder)
 	for i := 10; i < 20; i++ {
 		require.Equal(t, protocol.ECNNon, ecnTracker.Mode())
-		ecnTracker.SentPacket(protocol.PacketNumber(i), protocol.ECNNon)
+		ecnTracker.SentPacket(monotime.Now(), protocol.PacketNumber(i), protocol.ECNNon)
 	}
 	// Receive one CE count.
 	require.True(t, ecnTracker.HandleNewlyAcked(getAckedPackets(1, 2, 3, 12), 2, 0, 1))
@@ -350,4 +356,46 @@ func TestECNCongestionDetection(t *testing.T) {
 	// Increase in CE. More congestion.
 	require.True(t, ecnTracker.HandleNewlyAcked(getAckedPackets(7, 8, 9, 14), 7, 0, 2))
 	require.Empty(t, eventRecorder.Events())
+}
+
+func TestECNPathMigration(t *testing.T) {
+	var eventRecorder events.Recorder
+	ecnTracker := newECNTracker(utils.DefaultLogger, &eventRecorder)
+
+	// ECN is validated on the first path, with testing packets 5 to 9 still in flight
+	sendECNTestingPackets(t, ecnTracker, &eventRecorder)
+	require.False(t, ecnTracker.HandleNewlyAcked(getAckedPackets(0, 1, 2, 3, 4), 5, 0, 0))
+	eventRecorder.Clear()
+
+	now := monotime.Now()
+	ecnTracker.MigratedPath(now.Add(time.Second))
+	require.Equal(t, protocol.ECNNon, ecnTracker.Mode())
+	ecnTracker.SentPacket(now, 10, protocol.ECNNon)
+	require.Equal(t, protocol.ECNNon, ecnTracker.Mode())
+	ecnTracker.SentPacket(now.Add(time.Second), 11, protocol.ECNNon)
+	// CE marks for packets sent on the old path are not treated as congestion
+	require.False(t, ecnTracker.HandleNewlyAcked(getAckedPackets(10), 5, 0, 2))
+	require.Equal(t, protocol.ECNNon, ecnTracker.Mode())
+	// packet 11 was sent after the old path drained: its ACK reports the ECN counts for all packets sent on the old path
+	require.False(t, ecnTracker.HandleNewlyAcked(getAckedPackets(11), 5, 0, 5))
+	require.Empty(t, eventRecorder.Events())
+
+	for pn := protocol.PacketNumber(12); pn < 22; pn++ {
+		require.Equal(t, protocol.ECT0, ecnTracker.Mode())
+		ecnTracker.SentPacket(now.Add(time.Second), pn, protocol.ECT0)
+	}
+	require.Equal(t,
+		[]qlogwriter.Event{
+			qlog.ECNStateUpdated{State: qlog.ECNStateTesting},
+			qlog.ECNStateUpdated{State: qlog.ECNStateUnknown},
+		},
+		eventRecorder.Events(),
+	)
+	eventRecorder.Clear()
+	// 9 of the 10 testing packets are CE-marked: not mangling, but congestion
+	require.True(t, ecnTracker.HandleNewlyAcked(getAckedPackets(12, 13, 14, 15, 16, 17, 18, 19, 20, 21), 6, 0, 14))
+	require.Equal(t,
+		[]qlogwriter.Event{qlog.ECNStateUpdated{State: qlog.ECNStateCapable}},
+		eventRecorder.Events(),
+	)
 }
