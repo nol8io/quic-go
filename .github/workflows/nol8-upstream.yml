@@ -29,9 +29,6 @@ jobs:
     name: Upstream advisories
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: read
-      issues: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -47,21 +44,6 @@ jobs:
       - name: Scan this checkout
         if: ${{ !cancelled() }}
         run: govulncheck ./...
-      # A failed scheduled run opens one issue, so the owner and the repository's
-      # watchers hear of an advisory at once, not only the person who last edited
-      # the schedule.
-      - name: Open an issue for a failed scheduled run
-        if: ${{ failure() && github.event_name == 'schedule' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          title="Upstream advisories check failed"
-          open=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq length)
-          if [ "$open" = 0 ]; then
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
-              --body "An advisory affects the upstream release in nol8/UPSTREAM, or this checkout. See $RUN_URL. Fix within 7 days: see README.md, Ownership and security."
-          fi
 
   sync:
     name: Upstream sync

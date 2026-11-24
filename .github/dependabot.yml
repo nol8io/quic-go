@@ -7,6 +7,15 @@ updates:
   # nol8: the library's Go dependencies. Updates arrive as pull requests for the
   # owner to review; Dependabot security updates need the alerts setting on.
   - package-ecosystem: "gomod"
-    directory: "/"
+    directories:
+      - "/"
+      # Separate module (replaces quic-go with ../../); its indirect pins must
+      # move together with the root go.mod or `go test` fails with "go mod tidy".
+      - "/integrationtests/fips"
     schedule:
       interval: "weekly"
+    # One PR per bump across both modules, so the fips module never lags the root.
+    groups:
+      golang-x:
+        patterns:
+          - "golang.org/x/*"
