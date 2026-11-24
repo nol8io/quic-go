@@ -12,6 +12,7 @@ updates:
       # Separate module (replaces quic-go with ../../); its indirect pins must
       # move together with the root go.mod or `go test` fails with "go mod tidy".
       - "/integrationtests/fips"
+      - "/integrationtests/gomodvendor"
     schedule:
       interval: "weekly"
     # One PR per bump across both modules, so the fips module never lags the root.
