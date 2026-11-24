@@ -1,0 +1,38 @@
+name: nol8 CodeQL
+
+# nol8: static analysis (SAST) of the library for the fork's security baseline (see
+# "Ownership and security" in README.md). Results appear under Security > Code scanning.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "37 5 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+          check-latest: true
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: go
+          build-mode: autobuild
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:go
