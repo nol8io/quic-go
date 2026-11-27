@@ -237,11 +237,14 @@ func (t *Transport) createServer(tlsConf *tls.Config, conf *Config, allow0RTT bo
 }
 
 // Dial dials a new connection to a remote host (not using 0-RTT).
+// If a peer TLS alert closed the connection when the context was canceled,
+// the error contains both the context cause and the peer's [TransportError].
 func (t *Transport) Dial(ctx context.Context, addr net.Addr, tlsConf *tls.Config, conf *Config) (*Conn, error) {
 	return t.dial(ctx, addr, "", tlsConf, conf, false)
 }
 
 // DialEarly dials a new connection, attempting to use 0-RTT if possible.
+// Cancellation before handoff follows the same rules as [Transport.Dial].
 func (t *Transport) DialEarly(ctx context.Context, addr net.Addr, tlsConf *tls.Config, conf *Config) (*Conn, error) {
 	return t.dial(ctx, addr, "", tlsConf, conf, true)
 }
@@ -344,15 +347,16 @@ func (t *Transport) doDial(
 		earlyConnChan = conn.earlyConnReady()
 	}
 
+	var connErr, dialErr error
 	select {
 	case <-ctx.Done():
 		conn.destroy(nil)
-		// wait until the Go routine that called Conn.run() returns
+		// Join the worker to collect the close cause that won before teardown.
 		select {
-		case <-errChan:
+		case connErr = <-errChan:
 		case <-switchVersionChan:
 		}
-		return nil, context.Cause(ctx)
+		dialErr = context.Cause(ctx)
 	case params := <-switchVersionChan:
 		return t.doDial(ctx,
 			sendConn,
@@ -363,8 +367,8 @@ func (t *Transport) doDial(
 			use0RTT,
 			params.nextVersion,
 		)
-	case err := <-errChan:
-		return nil, err
+	case connErr = <-errChan:
+		dialErr = connErr
 	case <-earlyConnChan:
 		// ready to send 0-RTT data
 		return conn.Conn, nil
@@ -372,6 +376,14 @@ func (t *Transport) doDial(
 		// handshake successfully completed
 		return conn.Conn, nil
 	}
+	// Both channels can be ready. Preserve a winning peer TLS alert and
+	// the caller's cancellation cause whichever channel the select chose.
+	if peer, ok := errors.AsType[*TransportError](connErr); ok && peer.Remote && peer.ErrorCode.IsCryptoError() {
+		if cause := context.Cause(ctx); cause != nil {
+			return nil, errors.Join(cause, connErr)
+		}
+	}
+	return nil, dialErr
 }
 
 func (t *Transport) init(allowZeroLengthConnIDs bool) error {

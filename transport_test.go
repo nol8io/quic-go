@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math"
 	"net"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -488,9 +489,6 @@ func TestTransportDial(t *testing.T) {
 }
 
 func testTransportDial(t *testing.T, early bool) {
-	originalClientConnConstructor := newClientConnection
-	t.Cleanup(func() { newClientConnection = originalClientConnConstructor })
-
 	synctest.Test(t, func(t *testing.T) {
 		_, serverConn, closeFn := newSimnetLink(t, 10*time.Millisecond)
 		defer closeFn()
@@ -511,25 +509,7 @@ func testTransportDial(t *testing.T, early bool) {
 		conn.run = func() error { <-blockRun; return errors.New("done") }
 		defer close(blockRun)
 
-		newClientConnection = func(
-			_ context.Context,
-			_ sendConn,
-			_ connRunner,
-			_ protocol.ConnectionID,
-			_ protocol.ConnectionID,
-			_ ConnectionIDGenerator,
-			_ *statelessResetter,
-			_ *Config,
-			_ *tls.Config,
-			_ protocol.PacketNumber,
-			_ bool,
-			_ bool,
-			_ qlogwriter.Trace,
-			_ utils.Logger,
-			_ protocol.Version,
-		) *wrappedConn {
-			return &wrappedConn{testHooks: conn}
-		}
+		stubDialConnection(t, conn)
 
 		tr := &Transport{Conn: serverConn}
 		tr.init(true)
@@ -564,6 +544,86 @@ func testTransportDial(t *testing.T, early bool) {
 		default:
 		}
 	})
+}
+
+// stubDialConnection supplies the connection worker used by Transport.Dial.
+func stubDialConnection(t *testing.T, conn *connTestHooks) {
+	t.Helper()
+	originalClientConnConstructor := newClientConnection
+	t.Cleanup(func() { newClientConnection = originalClientConnConstructor })
+	newClientConnection = func(
+		_ context.Context,
+		_ sendConn,
+		_ connRunner,
+		_ protocol.ConnectionID,
+		_ protocol.ConnectionID,
+		_ ConnectionIDGenerator,
+		_ *statelessResetter,
+		_ *Config,
+		_ *tls.Config,
+		_ protocol.PacketNumber,
+		_ bool,
+		_ bool,
+		_ qlogwriter.Trace,
+		_ utils.Logger,
+		_ protocol.Version,
+	) *wrappedConn {
+		return &wrappedConn{testHooks: conn}
+	}
+}
+
+func TestTransportDialCancelledBeforeHandoff(t *testing.T) {
+	const badCertificate TransportErrorCode = 0x100 + 42
+	for _, tc := range []struct {
+		name      string
+		workerErr error
+		wantAlert bool
+	}{
+		{"remote bad_certificate", &TransportError{Remote: true, ErrorCode: badCertificate}, true},
+		{"remote no_application_protocol", &TransportError{Remote: true, ErrorCode: 0x100 + 120}, true},
+		{"local TLS alert", &TransportError{ErrorCode: badCertificate}, false},
+		{"remote transport close", &TransportError{Remote: true, ErrorCode: ConnectionRefused}, false},
+		{"local close", &ApplicationError{}, false},
+		{"version negotiation", &errSwitchVersion{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				_, endpoint, cleanup := newSimnetLink(t, 0)
+				defer cleanup()
+				tr := &Transport{Conn: endpoint}
+				defer tr.Close()
+
+				// The worker has selected its close cause. Hold publication until
+				// cancellation enters destroy, so the select cannot pick errChan.
+				destroyed := make(chan struct{})
+				destroy := sync.OnceFunc(func() { close(destroyed) })
+				stubDialConnection(t, &connTestHooks{
+					run:     func() error { <-destroyed; return tc.workerErr },
+					destroy: func(error) { destroy() },
+				})
+				ctx, cancel := context.WithCancelCause(t.Context())
+				result := make(chan error, 1)
+				go func() {
+					_, err := tr.Dial(ctx, nil, &tls.Config{}, nil)
+					result <- err
+				}()
+				synctest.Wait()
+				cause := errors.New("caller stopped dialing")
+				before := time.Now()
+				cancel(cause)
+				err := <-result
+				require.Equal(t, before, time.Now(), "cancellation waited for a peer or timer")
+				if tc.wantAlert {
+					require.ErrorIs(t, err, cause)
+					var peer *TransportError
+					require.ErrorAs(t, err, &peer)
+					require.Same(t, tc.workerErr, peer)
+				} else {
+					require.Same(t, cause, err)
+				}
+			})
+		})
+	}
 }
 
 func TestTransportDialingVersionNegotiation(t *testing.T) {
