@@ -990,6 +990,11 @@ func (c *Conn) handleHandshakeComplete(now monotime.Time) error {
 	// The server applies transport parameters right away, but the client side has to wait for handshake completion.
 	// During a 0-RTT connection, the client is only allowed to use the new transport parameters for 1-RTT packets.
 	if c.perspective == protocol.PerspectiveClient {
+		// nol8 (change 5): Config.OnClientHandshakeComplete runs here, before the
+		// deferred close of HandshakeComplete, so Dial returns only after it.
+		if notify := c.config.OnClientHandshakeComplete; notify != nil {
+			notify()
+		}
 		c.applyTransportParameters()
 		return nil
 	}

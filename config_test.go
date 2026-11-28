@@ -86,7 +86,7 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 		}
 
 		switch fn := typ.Field(i).Name; fn {
-		case "GetConfigForClient", "RequireAddressValidation", "GetLogWriter", "AllowConnectionWindowIncrease", "Tracer":
+		case "GetConfigForClient", "RequireAddressValidation", "GetLogWriter", "AllowConnectionWindowIncrease", "OnClientHandshakeComplete", "Tracer":
 			// Can't compare functions.
 		case "Versions":
 			f.Set(reflect.ValueOf([]Version{1, 2, 3}))
@@ -141,10 +141,11 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 
 func TestConfigClone(t *testing.T) {
 	t.Run("function fields", func(t *testing.T) {
-		var calledAllowConnectionWindowIncrease, calledTracer bool
+		var calledAllowConnectionWindowIncrease, calledHandshakeComplete, calledTracer bool
 		c1 := &Config{
 			GetConfigForClient:            func(info *ClientInfo) (*Config, error) { return nil, assert.AnError },
 			AllowConnectionWindowIncrease: func(*Conn, uint64) bool { calledAllowConnectionWindowIncrease = true; return true },
+			OnClientHandshakeComplete:     func() { calledHandshakeComplete = true },
 			Tracer: func(context.Context, bool, ConnectionID) qlogwriter.Trace {
 				calledTracer = true
 				return nil
@@ -153,6 +154,8 @@ func TestConfigClone(t *testing.T) {
 		c2 := c1.Clone()
 		c2.AllowConnectionWindowIncrease(nil, 1234)
 		require.True(t, calledAllowConnectionWindowIncrease)
+		c2.OnClientHandshakeComplete()
+		require.True(t, calledHandshakeComplete)
 		_, err := c2.GetConfigForClient(&ClientInfo{})
 		require.ErrorIs(t, err, assert.AnError)
 		c2.Tracer(context.Background(), true, protocol.ConnectionID{})
@@ -190,6 +193,7 @@ func TestConfigDefaultValues(t *testing.T) {
 	require.EqualValues(t, protocol.DefaultMaxIncomingUniStreams, c.MaxIncomingUniStreams)
 	require.False(t, c.DisablePathMTUDiscovery)
 	require.Nil(t, c.GetConfigForClient)
+	require.Nil(t, c.OnClientHandshakeComplete)
 	// Keep zero to distinguish the default from an explicitly configured floor.
 	require.Zero(t, c.InitialPacketSize)
 	require.Equal(t, protocol.ByteCount(protocol.InitialPacketSize), c.initialPacketSize())

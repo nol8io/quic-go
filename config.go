@@ -166,6 +166,7 @@ func populateConfig(config *Config) *Config {
 		DisablePathMTUDiscovery:          config.DisablePathMTUDiscovery,
 		EnableStreamResetPartialDelivery: config.EnableStreamResetPartialDelivery,
 		Allow0RTT:                        config.Allow0RTT,
+		OnClientHandshakeComplete:        config.OnClientHandshakeComplete,
 		Tracer:                           config.Tracer,
 	}
 }
