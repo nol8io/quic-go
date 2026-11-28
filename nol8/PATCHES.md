@@ -10,7 +10,7 @@ upstream" gives the detail of each.
 | 2 | No output, no `QUIC_GO_*` variables | Data Path SDK requirement D106 | sites marked `nol8 (D106)` |
 | 3 | Module path `github.com/nol8io/quic-go` | the fork's own module | every `go.mod` and import |
 | 4 | Fork maintenance and security baseline | ARG-150 | `nol8/`, `.github/`, README |
-| 5 | Client handshake completion callback | Hand close ownership to the SDK before dial returns, without packet tracing | `interface.go`, `config.go`, `connection.go` |
+| 5 | Client handshake completion callback | Hand close ownership to the SDK before dial returns, without packet tracing. A candidate for an upstream proposal; dropped once the SDK uses an equivalent upstream hook (README "End of life") | `interface.go`, `config.go`, `connection.go` and their tests |
 
 To see the exact diff, fetch the upstream commit in `UPSTREAM-COMMIT` and compare it with
 `master` (see the README).

@@ -102,8 +102,8 @@ these changes.
    `github.com/nol8io/quic-go`. It changes in every `go.mod` file and Go import, in the
    generated mocks, and in the package paths in CI and build scripts. Links to upstream
    issues, pull requests and documentation still point upstream.
-4. This section of the README.
-5. **Fork maintenance.** `nol8/UPSTREAM` names the upstream release that `master` holds,
+4. **Fork maintenance.** This section of the README, and the files that keep the fork.
+   `nol8/UPSTREAM` names the upstream release that `master` holds,
    and `nol8/UPSTREAM-COMMIT` the upstream commit that release's tag points to;
    `nol8/sync.sh` writes both. [`nol8/PATCHES.md`](nol8/PATCHES.md) lists the nol8 changes.
    `.github/CODEOWNERS`, `.github/dependabot.yml` and the workflows `nol8-codeql.yml` and
@@ -113,10 +113,15 @@ these changes.
    `.github/workflows/nol8-upstream.yml` runs them (see
    [Updating to a new upstream release](#updating-to-a-new-upstream-release) and
    [Ownership and security](#ownership-and-security)). None of them is part of the library.
-
 5. **Client handshake completion.** `Config.OnClientHandshakeComplete` lets a dialer
    choose how to close a cancelled connection during handoff. It runs once on the
-   client worker before `Transport.Dial` returns the connection. It needs no packet tracer.
+   client worker when local TLS completes, before `Transport.Dial` returns the
+   connection; a 0-RTT `DialEarly` can return before it runs. It needs no packet tracer.
+   - It's a candidate for an upstream proposal: a client hook that runs once local TLS
+     completes and before `Dial` returns, without a tracer. Once a sync brings such a
+     hook, the SDK moves to it. The next fork release then removes this field, its tests
+     in `config_test.go` and `integrationtests/self/handshake_test.go`, this entry and
+     its row in `nol8/PATCHES.md`. Until the SDK has moved, syncs keep the field.
 
 To see the full delta, fetch the upstream release named in
 `nol8/UPSTREAM`, without upstream's other tags, and compare it with `master`. Most of the
@@ -270,22 +275,24 @@ lists only this fork's tags. Never fetch upstream with its tags, and push branch
   no other copy than the repository secret.
 - **Fuzzing (accepted risk):** the four ClusterFuzz workflows are disabled (see above), so
   this fork doesn't run upstream's continuous fuzzing. The risk is accepted: the fork's
-  own changes touch packet sizing and logging, not parsing, and upstream fuzzes its
-  parsers and fixes what it finds, which reaches this fork through a sync. The owner
-  reviews this when a change touches parsing code.
+  own changes touch packet sizing, logging and a client handshake callback, not parsing,
+  and upstream fuzzes its parsers and fixes what it finds, which reaches this fork through
+  a sync. The owner reviews this when a change touches parsing code.
 - **Reporting:** report an issue in the fork's own change to the Data Path SDK team.
   Report anything else to upstream, as described in [SECURITY.md](SECURITY.md).
 
 ## End of life
 
-The fork stays until upstream covers both of its changes:
+The fork stays until upstream covers its library changes:
 
-- the maximum packet size is a configuration option (change 1); and
+- the maximum packet size is a configuration option (change 1);
 - upstream no longer makes the writes and reads that change 2 removes, or offers a way to
-  turn them off.
+  turn them off; and
+- upstream offers a hook equivalent to change 5, and the SDK uses it instead.
 
 Then the SDK and Argus move back to upstream quic-go and this repository is archived. nol8
-is proposing upstream that the maximum packet size become a configuration option.
+is proposing upstream that the maximum packet size become a configuration option; change 5
+is a candidate for an upstream proposal too.
 
 ---
 

@@ -207,10 +207,13 @@ type Config struct {
 	EnableStreamResetPartialDelivery bool
 
 	// OnClientHandshakeComplete, when set, runs once on the client connection's
-	// worker when local TLS completes, before [Transport.Dial] returns the
-	// established connection. The peer can still refuse the client's certificate.
-	// The callback must return promptly. Connections sharing a Config may call
-	// it concurrently. Servers ignore it.
+	// worker when local TLS completes. A dial without 0-RTT ([Transport.Dial],
+	// [DialAddr]) returns the connection only after the callback has returned.
+	// A 0-RTT dial ([Transport.DialEarly], [DialAddrEarly]) can return before
+	// the handshake completes, so the callback can run after it returns, or not
+	// at all if the handshake then fails. The peer can still refuse the client's
+	// certificate. The callback must return promptly. Connections sharing a
+	// Config may call it concurrently. Servers ignore it.
 	OnClientHandshakeComplete func()
 
 	Tracer func(ctx context.Context, isClient bool, connID ConnectionID) qlogwriter.Trace
