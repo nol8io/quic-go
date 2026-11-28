@@ -210,8 +210,9 @@ type Config struct {
 	// connection's worker when local TLS completes. It doesn't run if a later
 	// frame in the packet that completes TLS fails. The worker waits for it, so
 	// it must return promptly and must not call methods of the connection or
-	// its streams. Closing or waiting on the connection or its [Transport] from
-	// the callback deadlocks, since that waits for the worker.
+	// its streams. Closing the connection or its [Transport], or waiting on the
+	// connection, from the callback can deadlock, since that waits for the
+	// worker.
 	//
 	// A dial without 0-RTT ([Dial], [Transport.Dial], [DialAddr]) returns the
 	// connection only after the callback has returned. A 0-RTT dial
@@ -229,8 +230,9 @@ type Config struct {
 	// the Transport also destroys its connections without sending
 	// CONNECTION_CLOSE, so the interruption and the callback must agree, for
 	// example through one compare-and-swap, on which of them acts. Once the
-	// interruption has acted, the dial can still return the connection, already
-	// closed, so the caller treats any connection returned after that as ended.
+	// interruption has won, the dial can still return the connection, closed or
+	// about to close, so the caller treats any connection returned after that as
+	// ended.
 	//
 	// The peer can still refuse the client's certificate. Connections sharing a
 	// Config may call it concurrently. Servers ignore it.

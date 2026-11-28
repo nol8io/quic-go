@@ -179,7 +179,7 @@ func TestClientHandshakeCompleteAfterDialEarlyReturns(t *testing.T) {
 		require.NoError(t, err)
 		defer conn.CloseWithError(0, "")
 		// The bubble's clock stands still while this goroutine runs, so the
-		// server's first flight, half a round trip away, can't have arrived.
+		// server's first flight, a round trip away, can't have arrived.
 		select {
 		case <-conn.HandshakeComplete():
 			t.Fatal("DialEarly waited for the handshake to complete")

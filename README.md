@@ -17,8 +17,8 @@ The fork exists for three changes that upstream doesn't have (changes 1, 2 and 5
   and the process environment doesn't change what it does, so this fork removes the
   writes and reads that decision D106 lists. Change 2 names them, and the output that
   remains.
-- **Client handshake completion.** When a dial is cancelled after local TLS has
-  completed, the SDK chooses how the connection closes, so it has to learn of that
+- **Client handshake completion.** When the SDK cancels its own dial after local TLS
+  has completed, it chooses how the connection closes, so it has to learn of that
   moment before `Dial` returns. Upstream reports it then only to a `Config.Tracer`,
   which also receives an event for every packet. This fork adds
   `Config.OnClientHandshakeComplete`, a callback for that moment alone.
@@ -127,8 +127,10 @@ these changes.
      hook, the SDK moves to it. The next fork release then removes this field, its copy
      in `populateConfig` in `config.go`, its call in `handleHandshakeComplete` in
      `connection.go` (marked `nol8 (change 5)`), its tests in `config_test.go` and
-     `integrationtests/self/handshake_test.go`, this entry and its row in
-     `nol8/PATCHES.md`. Until the SDK has moved, syncs keep the field.
+     `integrationtests/self/handshake_test.go`, this entry, its bullet under "Why it
+     exists", its condition under "End of life", its mention in the count of library
+     changes at the top, and its row in `nol8/PATCHES.md`. Until the SDK has moved,
+     syncs keep the field.
 
 To see the full delta, fetch the upstream release named in
 `nol8/UPSTREAM`, without upstream's other tags, and compare it with `master`. Most of the
