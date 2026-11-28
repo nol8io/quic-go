@@ -157,6 +157,109 @@ func TestClientHandshakeCompleteBeforeDialReturns(t *testing.T) {
 	})
 }
 
+func TestClientHandshakeCompleteAfterDialEarlyReturns(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const rtt = 10 * time.Millisecond
+		clientUDP, serverUDP, closeLink := newSimnetLink(t, rtt)
+		defer closeLink(t)
+		serverTr := &quic.Transport{Conn: serverUDP}
+		defer serverTr.Close()
+		ln, err := serverTr.ListenEarly(getTLSConfig(), &quic.Config{Allow0RTT: true})
+		require.NoError(t, err)
+		defer ln.Close()
+		clientTLSConf := dialAndReceiveTicket(t, ln, clientUDP, nil)
+
+		tr := &quic.Transport{Conn: clientUDP}
+		defer tr.Close()
+		var calls atomic.Int32
+		clientConfig := &quic.Config{OnClientHandshakeComplete: func() { calls.Add(1) }}
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		conn, err := tr.DialEarly(ctx, ln.Addr(), clientTLSConf, clientConfig)
+		require.NoError(t, err)
+		defer conn.CloseWithError(0, "")
+		// The bubble's clock stands still while this goroutine runs, so the
+		// server's first flight, half a round trip away, can't have arrived.
+		select {
+		case <-conn.HandshakeComplete():
+			t.Fatal("DialEarly waited for the handshake to complete")
+		default:
+		}
+		require.Zero(t, calls.Load())
+
+		select {
+		case <-conn.HandshakeComplete():
+		case <-ctx.Done():
+			t.Fatal("handshake did not complete")
+		}
+		require.EqualValues(t, 1, calls.Load())
+		require.True(t, conn.ConnectionState().Used0RTT)
+		peer, err := ln.Accept(ctx)
+		require.NoError(t, err)
+		defer peer.CloseWithError(0, "")
+		select {
+		case <-peer.HandshakeComplete():
+		case <-ctx.Done():
+			t.Fatal("server handshake did not complete")
+		}
+		// Let the client process the rest of the handshake.
+		time.Sleep(10 * rtt)
+		require.EqualValues(t, 1, calls.Load())
+	})
+}
+
+func TestClientHandshakeCompleteThenDialCancelled(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		clientUDP, serverUDP, closeLink := newSimnetLink(t, time.Millisecond)
+		defer closeLink(t)
+		server, err := quic.Listen(serverUDP, getTLSConfig(), nil)
+		require.NoError(t, err)
+		defer server.Close()
+		tr := &quic.Transport{Conn: clientUDP}
+		defer tr.Close()
+
+		entered, resume := make(chan struct{}), make(chan struct{})
+		release := sync.OnceFunc(func() { close(resume) })
+		defer release()
+		var calls atomic.Int32
+		clientConfig := &quic.Config{OnClientHandshakeComplete: func() {
+			if calls.Add(1) == 1 {
+				close(entered)
+				<-resume
+			}
+		}}
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		done := make(chan struct{})
+		var conn *quic.Conn
+		go func() {
+			defer close(done)
+			conn, err = tr.Dial(ctx, server.Addr(), getTLSClientConfig(), clientConfig)
+		}()
+		select {
+		case <-entered:
+		case <-done:
+			t.Fatalf("Dial returned before the callback: %v", err)
+		case <-ctx.Done():
+			t.Fatal("client did not reach local handshake completion")
+		}
+		// HandshakeComplete stays open while the callback holds the worker, so
+		// the dialer observes the cancellation and waits for the worker.
+		cancel()
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("Dial returned while the handshake callback was running")
+		default:
+		}
+		release()
+		<-done
+		require.ErrorIs(t, err, context.Canceled)
+		require.Nil(t, conn)
+		require.EqualValues(t, 1, calls.Load())
+	})
+}
+
 func TestHandshakeConnectionStates(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const rtt = 10 * time.Millisecond
