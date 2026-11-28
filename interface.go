@@ -206,23 +206,33 @@ type Config struct {
 	// See https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset-09.
 	EnableStreamResetPartialDelivery bool
 
-	// OnClientHandshakeComplete, when set, runs once on the client connection's
-	// worker when local TLS completes. A dial without 0-RTT ([Transport.Dial],
-	// [DialAddr]) returns the connection only after the callback has returned.
+	// OnClientHandshakeComplete, when set, runs at most once on the client
+	// connection's worker when local TLS completes. It doesn't run if a later
+	// frame in the packet that completes TLS fails. The worker waits for it, so
+	// it must return promptly and must not call methods of the connection or
+	// its streams. Closing or waiting on the connection or its [Transport] from
+	// the callback deadlocks, since that waits for the worker.
+	//
+	// A dial without 0-RTT ([Dial], [Transport.Dial], [DialAddr]) returns the
+	// connection only after the callback has returned. A 0-RTT dial
+	// ([DialEarly], [Transport.DialEarly], [DialAddrEarly]) can return before
+	// the handshake completes, so the callback can run after it returns, or not
+	// at all if the handshake then fails.
+	//
 	// The callback having run doesn't mean the dial returns the connection: if
 	// the dial's context is cancelled, or the connection fails, before the dial
 	// observes completion, the dial returns an error, and on cancellation it
 	// destroys the connection without sending CONNECTION_CLOSE. A caller that
-	// must own the close once the callback has run therefore must not cancel the
-	// dial's context: it dials with a context that is never cancelled and
-	// interrupts the dial some other way, and only while the callback has not
-	// run, such as by closing the [Transport]. Closing the Transport also
-	// destroys its connections without sending CONNECTION_CLOSE, so the
-	// interruption and the callback must agree, for example through one
-	// compare-and-swap, on which of them acts. A 0-RTT dial ([Transport.DialEarly], [DialAddrEarly]) can return before
-	// the handshake completes, so the callback can run after it returns, or not
-	// at all if the handshake then fails. The peer can still refuse the client's
-	// certificate. The callback must return promptly. Connections sharing a
+	// must own the close once the callback has run therefore dials with a
+	// context it never cancels and interrupts the dial another way, and only
+	// while the callback has not run, such as by closing the Transport. Closing
+	// the Transport also destroys its connections without sending
+	// CONNECTION_CLOSE, so the interruption and the callback must agree, for
+	// example through one compare-and-swap, on which of them acts. Once the
+	// interruption has acted, the dial can still return the connection, already
+	// closed, so the caller treats any connection returned after that as ended.
+	//
+	// The peer can still refuse the client's certificate. Connections sharing a
 	// Config may call it concurrently. Servers ignore it.
 	OnClientHandshakeComplete func()
 
