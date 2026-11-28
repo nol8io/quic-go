@@ -6,7 +6,7 @@ this section is upstream's README, unchanged.
 
 ## Why it exists
 
-The fork exists for two changes that upstream doesn't have (changes 1 and 2 below):
+The fork exists for three changes that upstream doesn't have (changes 1, 2 and 5 below):
 
 - **Packet size.** Upstream caps every QUIC packet at 1452 bytes of UDP payload
   (`internal/protocol.MaxPacketBufferSize`), and no setting changes that. Iris links run on
@@ -17,6 +17,11 @@ The fork exists for two changes that upstream doesn't have (changes 1 and 2 belo
   and the process environment doesn't change what it does, so this fork removes the
   writes and reads that decision D106 lists. Change 2 names them, and the output that
   remains.
+- **Client handshake completion.** When a dial is cancelled after local TLS has
+  completed, the SDK chooses how the connection closes, so it has to learn of that
+  moment before `Dial` returns. Upstream reports it then only to a `Config.Tracer`,
+  which also receives an event for every packet. This fork adds
+  `Config.OnClientHandshakeComplete`, a callback for that moment alone.
 
 A Go library can't impose a `replace` directive on the applications that use it, so the
 changes ship as a fork with its own module path.
@@ -288,7 +293,8 @@ The fork stays until upstream covers its library changes:
 - the maximum packet size is a configuration option (change 1);
 - upstream no longer makes the writes and reads that change 2 removes, or offers a way to
   turn them off; and
-- upstream offers a hook equivalent to change 5, and the SDK uses it instead.
+- upstream offers a client hook that runs once local TLS completes and before `Dial`
+  returns, without a tracer (change 5).
 
 Then the SDK and Argus move back to upstream quic-go and this repository is archived. nol8
 is proposing upstream that the maximum packet size become a configuration option; change 5
