@@ -209,6 +209,13 @@ type Config struct {
 	// OnClientHandshakeComplete, when set, runs once on the client connection's
 	// worker when local TLS completes. A dial without 0-RTT ([Transport.Dial],
 	// [DialAddr]) returns the connection only after the callback has returned.
+	// The callback having run doesn't mean the dial returns the connection: if
+	// the dial's context is cancelled, or the connection fails, before the dial
+	// observes completion, the dial returns an error, and on cancellation it
+	// destroys the connection without sending CONNECTION_CLOSE. A caller that
+	// must own the close once the callback has run therefore must not cancel the
+	// dial's context: it dials with a context that is never cancelled and
+	// interrupts the dial some other way, such as closing the [Transport].
 	// A 0-RTT dial ([Transport.DialEarly], [DialAddrEarly]) can return before
 	// the handshake completes, so the callback can run after it returns, or not
 	// at all if the handshake then fails. The peer can still refuse the client's
