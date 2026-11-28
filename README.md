@@ -119,14 +119,16 @@ these changes.
    [Updating to a new upstream release](#updating-to-a-new-upstream-release) and
    [Ownership and security](#ownership-and-security)). None of them is part of the library.
 5. **Client handshake completion.** `Config.OnClientHandshakeComplete` lets a dialer
-   choose how to close a cancelled connection during handoff. It runs once on the
-   client worker when local TLS completes, before `Transport.Dial` returns the
+   choose how to close a cancelled connection during handoff. It runs at most once on
+   the client worker when local TLS completes, before `Transport.Dial` returns the
    connection; a 0-RTT `DialEarly` can return before it runs. It needs no packet tracer.
    - It's a candidate for an upstream proposal: a client hook that runs once local TLS
      completes and before `Dial` returns, without a tracer. Once a sync brings such a
-     hook, the SDK moves to it. The next fork release then removes this field, its tests
-     in `config_test.go` and `integrationtests/self/handshake_test.go`, this entry and
-     its row in `nol8/PATCHES.md`. Until the SDK has moved, syncs keep the field.
+     hook, the SDK moves to it. The next fork release then removes this field, its copy
+     in `populateConfig` in `config.go`, its call in `handleHandshakeComplete` in
+     `connection.go` (marked `nol8 (change 5)`), its tests in `config_test.go` and
+     `integrationtests/self/handshake_test.go`, this entry and its row in
+     `nol8/PATCHES.md`. Until the SDK has moved, syncs keep the field.
 
 To see the full delta, fetch the upstream release named in
 `nol8/UPSTREAM`, without upstream's other tags, and compare it with `master`. Most of the
