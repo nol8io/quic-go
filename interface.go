@@ -215,8 +215,11 @@ type Config struct {
 	// destroys the connection without sending CONNECTION_CLOSE. A caller that
 	// must own the close once the callback has run therefore must not cancel the
 	// dial's context: it dials with a context that is never cancelled and
-	// interrupts the dial some other way, such as closing the [Transport].
-	// A 0-RTT dial ([Transport.DialEarly], [DialAddrEarly]) can return before
+	// interrupts the dial some other way, and only while the callback has not
+	// run, such as by closing the [Transport]. Closing the Transport also
+	// destroys its connections without sending CONNECTION_CLOSE, so the
+	// interruption and the callback must agree, for example through one
+	// compare-and-swap, on which of them acts. A 0-RTT dial ([Transport.DialEarly], [DialAddrEarly]) can return before
 	// the handshake completes, so the callback can run after it returns, or not
 	// at all if the handshake then fails. The peer can still refuse the client's
 	// certificate. The callback must return promptly. Connections sharing a
