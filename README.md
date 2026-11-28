@@ -114,7 +114,11 @@ these changes.
    [Updating to a new upstream release](#updating-to-a-new-upstream-release) and
    [Ownership and security](#ownership-and-security)). None of them is part of the library.
 
-Nothing else changes. To see the full delta, fetch the upstream release named in
+5. **Client handshake completion.** `Config.OnClientHandshakeComplete` lets a dialer
+   choose how to close a cancelled connection during handoff. It runs once on the
+   client worker before `Transport.Dial` returns the connection. It needs no packet tracer.
+
+To see the full delta, fetch the upstream release named in
 `nol8/UPSTREAM`, without upstream's other tags, and compare it with `master`. Most of the
 delta is the module path.
 

@@ -10,6 +10,7 @@ import (
 	"net"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -99,6 +100,61 @@ func TestHandshake(t *testing.T) {
 			defer serverConn.CloseWithError(0, "")
 		})
 	}
+}
+
+func TestClientHandshakeCompleteBeforeDialReturns(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		clientUDP, serverUDP, closeLink := newSimnetLink(t, time.Millisecond)
+		defer closeLink(t)
+		server, err := quic.Listen(serverUDP, getTLSConfig(), &quic.Config{
+			OnClientHandshakeComplete: func() { t.Error("server called the client handshake callback") },
+		})
+		require.NoError(t, err)
+		defer server.Close()
+		tr := &quic.Transport{Conn: clientUDP}
+		defer tr.Close()
+
+		entered, resume := make(chan struct{}), make(chan struct{})
+		release := sync.OnceFunc(func() { close(resume) })
+		defer release()
+		var calls atomic.Int32
+		clientConfig := &quic.Config{OnClientHandshakeComplete: func() {
+			if calls.Add(1) == 1 {
+				close(entered)
+				<-resume
+			}
+		}}
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		done := make(chan struct{})
+		var conn *quic.Conn
+		go func() {
+			defer close(done)
+			conn, err = tr.Dial(ctx, server.Addr(), getTLSClientConfig(), clientConfig)
+		}()
+		select {
+		case <-entered:
+		case <-done:
+			t.Fatalf("Dial returned before the callback: %v", err)
+		case <-ctx.Done():
+			t.Fatal("client did not reach local handshake completion")
+		}
+		// Let the dialer run until it blocks while the callback holds the worker.
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("Dial returned while the handshake callback was running")
+		default:
+		}
+		release()
+		<-done
+		require.NoError(t, err)
+		defer conn.CloseWithError(0, "")
+		peer, err := server.Accept(ctx)
+		require.NoError(t, err)
+		defer peer.CloseWithError(0, "")
+		require.EqualValues(t, 1, calls.Load())
+	})
 }
 
 func TestHandshakeConnectionStates(t *testing.T) {

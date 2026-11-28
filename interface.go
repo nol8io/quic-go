@@ -206,6 +206,13 @@ type Config struct {
 	// See https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset-09.
 	EnableStreamResetPartialDelivery bool
 
+	// OnClientHandshakeComplete, when set, runs once on the client connection's
+	// worker when local TLS completes, before [Transport.Dial] returns the
+	// established connection. The peer can still refuse the client's certificate.
+	// The callback must return promptly. Connections sharing a Config may call
+	// it concurrently. Servers ignore it.
+	OnClientHandshakeComplete func()
+
 	Tracer func(ctx context.Context, isClient bool, connID ConnectionID) qlogwriter.Trace
 }
 
